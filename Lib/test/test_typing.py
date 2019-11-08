@@ -1862,7 +1862,7 @@ class GenericTests(BaseTestCase):
             self.assertEqual(x.__dict__, {'foo': 42, 'bar': 'abc'})
         samples = [Any, Union, Tuple, Callable, ClassVar,
                    Union[int, str], ClassVar[List], Tuple[int, ...], Callable[[str], bytes],
-                   typing.DefaultDict, typing.FrozenSet[int]]
+                   typing.DefaultDict, typing.FrozenSet[int], int|str]
         for s in samples:
             for proto in range(pickle.HIGHEST_PROTOCOL + 1):
                 z = pickle.dumps(s, proto)
@@ -1879,11 +1879,11 @@ class GenericTests(BaseTestCase):
     def test_copy_and_deepcopy(self):
         T = TypeVar('T')
         class Node(Generic[T]): ...
-        things = [Union[T, int], Tuple[T, int], Callable[..., T], Callable[[int], int],
+        things = [T|int, Union[T, int], Tuple[T, int], Callable[..., T], Callable[[int], int],
                   Tuple[Any, Any], Node[T], Node[int], Node[Any], typing.Iterable[T],
                   typing.Iterable[Any], typing.Iterable[int], typing.Dict[int, str],
                   typing.Dict[T, Any], ClassVar[int], ClassVar[List[T]], Tuple['T', 'T'],
-                  Union['T', int], List['T'], typing.Mapping['T', int]]
+                  Union['T', int], List['T'], typing.Mapping['T', int],]
         for t in things + [Any]:
             self.assertEqual(t, copy(t))
             self.assertEqual(t, deepcopy(t))

@@ -40,6 +40,7 @@ __all__ = [
     'Literal',
     'Optional',
     'Protocol',
+    'ShadowType', 
     'Tuple',
     'Type',
     'TypeVar',
@@ -116,6 +117,22 @@ __all__ = [
 # namespace, but excluded from __all__ because they might stomp on
 # legitimate imports of those modules.
 
+ShadowType = shadowobject # base type that gets checked
+
+def _promote_shadow(shadow):
+    PyShadow_Base = 0
+    PyShadow_UnionTp = 1
+    PyShadow_ForwardRefTp = 2
+    
+    if isinstance(shadow, ShadowType):
+        if shadow.tp == PyShadow_Base:
+            return shadow
+        if shadow.tp == PyShadow_UnionTp:
+            return Union[tuple(shadow)]
+        #elif shadow.tp == PyShadow_ForwardRefTp:
+        #    return ForwardRef[tuple(shadow)]
+        assert False, "invalid shadow type"
+    return shadow
 
 def _type_check(arg, msg, is_argument=True):
     """Check that the argument is a type, and return it (internal helper).
@@ -129,6 +146,7 @@ def _type_check(arg, msg, is_argument=True):
 
     We append the repr() of the actual value (truncated to 100 chars).
     """
+    arg = _promote_shadow(arg)
     invalid_generic_forms = (Generic, Protocol)
     if is_argument:
         invalid_generic_forms = invalid_generic_forms + (ClassVar, Final)
@@ -266,6 +284,8 @@ def _eval_type(t, globalns, localns):
     """Evaluate all forward reverences in the given type t.
     For use of globalns and localns see the docstring for get_type_hints().
     """
+    if isinstance(t, ShadowType):
+        t = _promote_shadow(t)
     if isinstance(t, ForwardRef):
         return t._evaluate(globalns, localns)
     if isinstance(t, _GenericAlias):
@@ -496,6 +516,7 @@ class ForwardRef(_Final, _root=True):
     def __init__(self, arg, is_argument=True):
         if not isinstance(arg, str):
             raise TypeError(f"Forward reference must be a string -- got {arg!r}")
+        arg = _promote_shadow(arg)
         try:
             code = compile(arg, '<string>', 'eval')
         except SyntaxError:
@@ -536,7 +557,7 @@ class ForwardRef(_Final, _root=True):
         return f'ForwardRef({self.__forward_arg__!r})'
 
 
-class TypeVar(_Final, _Immutable, _root=True):
+class TypeVar(_Final, _Immutable, ShadowType, _root=True):
     """Type variable.
 
     Usage::
@@ -608,8 +629,6 @@ class TypeVar(_Final, _Immutable, _root=True):
         return Union[self,right]
     def __ror__(self,right):
         return Union[self,right]
-    def __invert__(self):
-        return Union[self,None]
 
     def __repr__(self):
         if self.__covariant__:
@@ -651,7 +670,7 @@ def _is_dunder(attr):
     return attr.startswith('__') and attr.endswith('__')
 
 
-class _GenericAlias(_Final, _root=True):
+class _GenericAlias(_Final, ShadowType, _root=True):
     """The central part of internal API.
 
     This represents a generic version of type 'origin' with type arguments 'params'.
@@ -672,7 +691,7 @@ class _GenericAlias(_Final, _root=True):
         self.__origin__ = origin
         self.__args__ = tuple(... if a is _TypingEllipsis else
                               () if a is _TypingEmpty else
-                              a for a in params)
+                              _promote_shadow(a) for a in params)
         self.__parameters__ = _collect_type_vars(params)
         self.__slots__ = None  # This is not documented.
         if not name:
@@ -682,8 +701,6 @@ class _GenericAlias(_Final, _root=True):
         return Union[self,right]
     def __ror__(self,right):
         return Union[self,right]
-    def __invert__(self):
-        return Union[self,None]
 
     @_tp_cache
     def __getitem__(self, params):
@@ -720,6 +737,9 @@ class _GenericAlias(_Final, _root=True):
                 f'{_type_repr(self.__args__[-1])}]')
 
     def __eq__(self, other):
+        if isinstance(other, ShadowType):
+            other = _promote_shadow(other)
+
         if not isinstance(other, _GenericAlias):
             return NotImplemented
         if self.__origin__ != other.__origin__:
@@ -894,7 +914,7 @@ class Generic:
             raise TypeError(
                 f"Parameter list to {cls.__qualname__}[...] cannot be empty")
         msg = "Parameters to generic types must be types."
-        params = tuple(_type_check(p, msg) for p in params)
+        params = tuple(_promote_shadow(_type_check(p, msg)) for p in params)
         if cls in (Generic, Protocol):
             # Generic and Protocol can only be subscripted with unique type variables.
             if not all(isinstance(p, TypeVar) for p in params):
@@ -1289,6 +1309,7 @@ def get_origin(tp):
         get_origin(Union[T, int]) is Union
         get_origin(List[Tuple[T, T]][int]) == list
     """
+    tp = _promote_shadow(tp)
     if isinstance(tp, _GenericAlias):
         return tp.__origin__
     if tp is Generic:
@@ -1307,8 +1328,9 @@ def get_args(tp):
         get_args(Union[int, Tuple[T, int]][str]) == (int, Tuple[str, int])
         get_args(Callable[[], T][int]) == ([], int)
     """
+    tp = _promote_shadow(tp)
     if isinstance(tp, _GenericAlias):
-        res = tp.__args__
+        res = tuple(_promote_shadow(arg) for arg in tp.__args__)
         if get_origin(tp) is collections.abc.Callable and res[0] is not Ellipsis:
             res = (list(res[:-1]), res[-1])
         return res

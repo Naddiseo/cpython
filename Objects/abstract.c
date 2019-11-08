@@ -2462,7 +2462,7 @@ recursive_isinstance(PyObject *inst, PyObject *cls)
 static PyObject*
 union_to_tuple(PyObject* cls) {
     //printf("union_to_tuple");
-    if (!strcmp(Py_TYPE(cls)->tp_name,"_GenericAlias")) {
+    /*if (!strcmp(Py_TYPE(cls)->tp_name,"_GenericAlias")) {
         PyObject* origin = PyObject_GetAttrString(cls, "__origin__");
         //printf("origin = %p\n",origin);
         if (origin == NULL) {
@@ -2489,6 +2489,10 @@ union_to_tuple(PyObject* cls) {
             Py_DECREF(name);
         }
         Py_DECREF(origin);
+    }*/
+    if (Py_TYPE(cls) == &PyShadow_Type) {
+        // TODO: type check shadow type
+        return PyShadow_UnionAsTuple(cls);
     }
     return cls;
 }

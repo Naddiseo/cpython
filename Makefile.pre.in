@@ -412,6 +412,7 @@ OBJECT_OBJS=	\
 		Objects/picklebufobject.o \
 		Objects/rangeobject.o \
 		Objects/setobject.o \
+		Objects/shadowobject.o \
 		Objects/sliceobject.o \
 		Objects/structseq.o \
 		Objects/tupleobject.o \
@@ -1038,6 +1039,7 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/pytime.h \
 		$(srcdir)/Include/rangeobject.h \
 		$(srcdir)/Include/setobject.h \
+		$(srcdir)/Include/shadowobject.h \
 		$(srcdir)/Include/sliceobject.h \
 		$(srcdir)/Include/structmember.h \
 		$(srcdir)/Include/structseq.h \

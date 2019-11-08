@@ -3638,6 +3638,23 @@ type_is_gc(PyTypeObject *type)
 }
 
 static PyObject *
+type_or(PyTypeObject *self, PyObject *param) {
+    if (param == NULL) {
+        PyErr_SetString(PyExc_TypeError, "'type' expected");
+        return NULL;
+    }
+    
+    PyObject *shadow = PyShadow_Union((PyObject *)self, param);
+    if (shadow == NULL) {
+        PyErr_SetString(PyExc_TypeError, "could not construct shadow union in type | type");
+        return NULL;
+    }
+    
+    return shadow;
+}
+
+/*
+static PyObject *
 type_or(PyTypeObject* self, PyObject* param) {
     PyObject* typing=PyImport_ImportModule("typing");
     PyTypeObject* genericAlias = (PyTypeObject*)PyObject_GetAttrString(typing,"_GenericAlias");
@@ -3673,7 +3690,7 @@ type_or(PyTypeObject* self, PyObject* param) {
     // 4. Return instance
     return newUnion;
 }
-
+*/
 static PyNumberMethods type_as_number = {
         .nb_or = (binaryfunc)type_or, // Add __or__ function
 };

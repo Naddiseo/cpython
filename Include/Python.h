@@ -107,6 +107,7 @@
 #include "dictobject.h"
 #include "odictobject.h"
 #include "enumobject.h"
+#include "shadowobject.h"
 #include "setobject.h"
 #include "methodobject.h"
 #include "moduleobject.h"

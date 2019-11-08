@@ -534,6 +534,7 @@ EXPORTS
   PySet_Pop=python39.PySet_Pop
   PySet_Size=python39.PySet_Size
   PySet_Type=python39.PySet_Type DATA
+  PyShadow_Type=python39.PyShadow_Type DATA
   PySlice_AdjustIndices=python39.PySlice_AdjustIndices
   PySlice_GetIndices=python39.PySlice_GetIndices
   PySlice_GetIndicesEx=python39.PySlice_GetIndicesEx

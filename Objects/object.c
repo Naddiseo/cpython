@@ -1819,6 +1819,7 @@ _PyTypes_Init(void)
     INIT_TYPE(&PyTuple_Type, "tuple");
     INIT_TYPE(&PyEnum_Type, "enumerate");
     INIT_TYPE(&PyReversed_Type, "reversed");
+    INIT_TYPE(&PyShadow_Type, "shadowobject");
     INIT_TYPE(&PyStdPrinter_Type, "StdPrinter");
     INIT_TYPE(&PyCode_Type, "code");
     INIT_TYPE(&PyFrame_Type, "frame");
