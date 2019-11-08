@@ -31,7 +31,7 @@ _is_same_type(PyObject *lhs, PyObject *rhs)
     }
     if (lhs == rhs)
     { // TODO: this isn't correct
-        printf("is same type\n");
+        //printf("is same type\n");
         return 1;
     }
 
@@ -144,7 +144,7 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
 
     if (target_tp < 0)
     {
-        printf("target_tp=%s\n", Py_TYPE(target)->tp_name);
+        //printf("target_tp=%s\n", Py_TYPE(target)->tp_name);
         PyErr_SetString(PyExc_TypeError, "'target' should be a type, None, or union");
         Py_DECREF(shadow);
         return NULL;
