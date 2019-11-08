@@ -2880,6 +2880,7 @@ class GetUtilitiesTestCase(TestCase):
         self.assertIs(get_origin(int), None)
         self.assertIs(get_origin(ClassVar[int]), ClassVar)
         self.assertIs(get_origin(Union[int, str]), Union)
+        self.assertIs(get_origin(int | str), Union)
         self.assertIs(get_origin(Literal[42, 43]), Literal)
         self.assertIs(get_origin(Final[List[int]]), Final)
         self.assertIs(get_origin(Generic), Generic)
@@ -2894,9 +2895,12 @@ class GetUtilitiesTestCase(TestCase):
         self.assertEqual(get_args(int), ())
         self.assertEqual(get_args(ClassVar[int]), (int,))
         self.assertEqual(get_args(Union[int, str]), (int, str))
+        self.assertEqual(get_args(int|str), (int, str))
         self.assertEqual(get_args(Literal[42, 43]), (42, 43))
         self.assertEqual(get_args(Final[List[int]]), (List[int],))
         self.assertEqual(get_args(Union[int, Tuple[T, int]][str]),
+                         (int, Tuple[str, int]))
+        self.assertEqual(get_args((int | Tuple[T, int])[str]),
                          (int, Tuple[str, int]))
         self.assertEqual(get_args(typing.Dict[int, Tuple[T, T]][Optional[int]]),
                          (int, Tuple[Optional[int], Optional[int]]))
