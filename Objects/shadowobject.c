@@ -3,8 +3,6 @@
 
 #include "Python.h"
 
-#include "clinic/shadowobject.c.h"
-
 // Dummy Type to use in typing.py
 /*[clinic input]
 class shadowobject "shadowobject *" "&PyShadow_Type"
@@ -13,14 +11,19 @@ class shadowobject "shadowobject *" "&PyShadow_Type"
 typedef struct
 {
     PyObject_HEAD
-    int s_tp; // the type
+    int s_tp;  // the type
     PyTupleObject *s_params; /* tuple of params */
 } shadowobject;
+
+#include "clinic/shadowobject.c.h"
 
 #define PyShadow_Base 0
 #define PyShadow_UnionTp 1
 #define PyShadow_ForwardRefTp 2
-#define PyShadow_MAXTp 2
+#define PyShadow_TypeVarTp 3
+#define PyShadow_MAXTp 3
+
+PyObject *_get_promoted(PyObject *shadow);
 
 Py_ssize_t
 _is_same_type(PyObject *lhs, PyObject *rhs)
@@ -29,7 +32,7 @@ _is_same_type(PyObject *lhs, PyObject *rhs)
     {
         return 1;
     }
-    if (lhs == rhs)
+    if ((lhs) == (rhs))
     { // TODO: this isn't correct
         //printf("is same type\n");
         return 1;
@@ -65,7 +68,12 @@ union_check_in(shadowobject *s, PyObject *needle)
 Py_ssize_t
 typ_check(PyObject *thing)
 {
-    // returns -1 if thing is not a type, None, or union
+    // return 1 if thing is None, callable, other shadow type, or type
+    // return 2 for shadow union
+    // return 3 for string
+    // returns -1 for anything else
+
+    //returns -1 if thing is not a type, None, or union
     if (thing == NULL)
     {
         return -1;
@@ -77,7 +85,7 @@ typ_check(PyObject *thing)
     // forward ref, should it be explicit?
     if (PyObject_IsInstance(thing, (PyObject *)&PyUnicode_Type) > 0)
     {
-        return 1;
+        return 3;
     }
     if (PyObject_IsInstance(thing, (PyObject *)&PyType_Type) > 0)
     {
@@ -85,8 +93,9 @@ typ_check(PyObject *thing)
     }
     if (PyObject_IsInstance(thing, (PyObject *)&PyShadow_Type) > 0)
     {
-        // todo: might need to change this, ori specialize based upon type
-        if (((shadowobject *)thing)->s_tp == PyShadow_UnionTp) {
+        // todo: might need to change this, or specialize based upon type
+        if (((shadowobject *)thing)->s_tp == PyShadow_UnionTp)
+        {
             return 2;
         }
         return 1; // maybe also 2?
@@ -97,7 +106,7 @@ typ_check(PyObject *thing)
         // equiv to the `if not callable(...)` line
         return -1;
     }
-    // TODO: anyting else?
+    // TODO: anything else?
     return 1;
 }
 
@@ -160,9 +169,30 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
     {
         target = (PyObject *)Py_TYPE(Py_None);
     }
+    else if (target_tp == 3)
+    { // str
+        target = PyShadow_ForwardRef(target);
+        if (target == NULL)
+        {
+            Py_DECREF(shadow);
+            return NULL;
+        }
+        target_tp = 1;
+    }
     if (alias == Py_None)
     {
         alias = (PyObject *)Py_TYPE(Py_None);
+    }
+    else if (alias_tp == 3)
+    {
+        alias = PyShadow_ForwardRef(alias);
+        if (alias == NULL)
+        {
+            //TODO: I need to decref target here, but only if it's a forward ref..
+            Py_DECREF(shadow);
+            return NULL;
+        }
+        alias_tp = 1;
     }
 
     /* in the simple case, both target and alias are simple types */
@@ -172,8 +202,9 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
 
         if (target == alias)
         { // is this valid?
+            //printf("target==alias\n");
             Py_DECREF(shadow);
-            // TODO: incref target ?
+            Py_INCREF(target);
             return target;
         }
 
@@ -378,6 +409,38 @@ PyShadow_Union(PyObject *target, PyObject *alias)
     return PyShadow_Union_(&PyShadow_Type, target, alias);
 }
 
+PyObject *
+PyShadow_ForwardRef(PyObject *ref_str)
+{
+    shadowobject *shadow;
+    PyTypeObject *type = &PyShadow_Type;
+    PyObject *params;
+
+    if (ref_str == NULL || !PyUnicode_Check(ref_str))
+    {
+        PyErr_SetString(PyExc_TypeError, "Cannot create shadow forward ref from non-string");
+        return NULL;
+    }
+    shadow = (shadowobject *)type->tp_alloc(type, 0);
+    if (shadow == NULL)
+    {
+        return NULL;
+    }
+    shadow->s_tp = PyShadow_ForwardRefTp;
+
+    params = PyTuple_Pack(1, ref_str);
+    if (params == NULL)
+    {
+        Py_DECREF(shadow);
+        return NULL;
+    }
+
+    Py_INCREF(params);
+    shadow->s_params = params;
+
+    return (PyObject *)shadow;
+}
+
 /*[clinic input]
 @classmethod
 shadowobject.__new__ as shadow_new
@@ -399,11 +462,35 @@ shadow_new_impl(PyTypeObject *type)
     }
     shadow->s_tp = PyShadow_Base;
     shadow->s_params = (PyTupleObject *)PyTuple_New(0); // ensure this is always a valid tuple
-    if (shadow->s_params == NULL) {
+    if (shadow->s_params == NULL)
+    {
         Py_DECREF(shadow);
         return NULL;
     }
+    //printf("shadow__new__\n");
     return (PyObject *)shadow;
+}
+
+/*[clinic input]
+shadowobject.__init__ as shadow_init
+
+    tp: 'i' = 0
+    /
+
+[clinic start generated code]*/
+
+static int
+shadow_init_impl(shadowobject *self, int tp)
+/*[clinic end generated code: output=bf5aecee1a0ad583 input=e3d724cf2fb6500a]*/
+{
+    //printf("shadow.init(%i)\n", tp);
+    self->s_tp = tp;
+    self->s_params = (PyTupleObject *)PyTuple_New(0); // ensure this is always a valid tuple
+    if (self->s_params == NULL)
+    {
+        return -1;
+    }
+    return 0;
 }
 
 static void
@@ -413,7 +500,6 @@ shadowobject_dealloc(shadowobject *shadow)
     Py_XDECREF(shadow->s_params);
     Py_TYPE(shadow)->tp_free(shadow);
 }
-
 
 static int
 shadowobject_traverse(shadowobject *shadow, visitproc visit, void *arg)
@@ -425,84 +511,26 @@ shadowobject_traverse(shadowobject *shadow, visitproc visit, void *arg)
 static PyObject *
 shadow_repr(shadowobject *shadow)
 {
-    Py_ssize_t i;
-    _PyUnicodeWriter writer;
-
-    i = Py_ReprEnter((PyObject *)shadow);
-    if (i != 0)
+    /* since repr is "debug" function, and out of scope for isinstance/issubclass
+       we can import the typing module here, and do a promotion to typing.Union
+    */
+    PyObject *promoted, *s;
+    //printf("called shadow_repr %p\n", shadow);
+    // TODO: this is causing an infinite recursion from pickling
+    promoted = _get_promoted((PyObject *)shadow);
+    if (promoted == NULL)
     {
-        return i > 0 ? PyUnicode_FromString("...") : NULL;
+        return NULL;
     }
-    _PyUnicodeWriter_Init(&writer);
-    writer.overallocate = 1; // TODO
-    /* "Union[x,y]" */
-    writer.min_length = 12;
-    
-    if (shadow->s_tp == PyShadow_Base) {
-        if (_PyUnicodeWriter_WriteASCIIString(&writer, "<ShadowType>", 12) < 0)
-        {
-            goto error;
-        }
-        goto end;
-    }
-    else if (shadow->s_tp == PyShadow_UnionTp) {
-        if (_PyUnicodeWriter_WriteASCIIString(&writer, "Union[", 6) < 0)
-        {
-            goto error;
-        }
-    }
-    else if (shadow->s_tp == PyShadow_ForwardRefTp) {
-        if (_PyUnicodeWriter_WriteASCIIString(&writer, "ForwardRef[", 11) < 0)
-        {
-            goto error;
-        }
-    }
-    else {
-        goto error;
-    }
+    /*int x = PyObject_IsInstance(promoted, &PyShadow_Type);
+    if (x > 0) {
+        printf("after promotion %p shadow is still shadow type with tp=%d\n", shadow, shadow->s_tp);
+    }*/
 
+    s = PyObject_Repr(promoted);
+    Py_DECREF(promoted);
 
-    PyObject *s;
-    s = PyObject_Repr((PyObject *)shadow->s_params);
-    if (s == NULL)
-    {
-        goto error;
-    }
-
-    if (_PyUnicodeWriter_WriteStr(&writer, s) < 0)
-    {
-        Py_DECREF(s);
-        goto error;
-    }
-    Py_DECREF(s);
-
-    /*
-	if (_PyUnicodeWriter_WriteASCIIString(&writer, ", ", 2) < 0)
-		goto error;
-	
-	s = PyObject_Repr(un->un_params);
-	if (s == NULL) {
-		goto error;
-	}
-	
-	if (_PyUnicodeWriter_WriteStr(&writer, s) < 0) {
-		Py_DECREF(s);
-		goto error;
-	}
-	Py_DECREF(s);
-	*/
-
-    if (_PyUnicodeWriter_WriteChar(&writer, ']') < 0)
-    {
-        goto error;
-    }
-end:
-    Py_ReprLeave((PyObject *)shadow);
-    return _PyUnicodeWriter_Finish(&writer);
-error:
-    _PyUnicodeWriter_Dealloc(&writer);
-    Py_ReprLeave((PyObject *)shadow);
-    return NULL;
+    return s;
 }
 
 PyObject *
@@ -520,7 +548,6 @@ shadow_iter(PyObject *self)
     return PyObject_GetIter(PyShadow_UnionAsTuple(self));
 }
 
-
 static PyObject *
 shadow_richcompare(PyObject *v, PyObject *w, int op)
 {
@@ -528,7 +555,7 @@ shadow_richcompare(PyObject *v, PyObject *w, int op)
     Py_ssize_t i;
     int cmp;
     Py_ssize_t vlen, wlen;
-    
+
     // TODO: typecheck
 
     if (!PyShadow_CheckExact(v) || !PyShadow_CheckExact(w))
@@ -541,6 +568,11 @@ shadow_richcompare(PyObject *v, PyObject *w, int op)
     }
     vu = (shadowobject *)v;
     wu = (shadowobject *)w;
+    
+    if (vu->s_tp != wu->s_tp) {
+        // can't compare types that aren't equal
+        Py_RETURN_NOTIMPLEMENTED;
+    }
 
     vlen = PyTuple_Size((PyObject *)vu->s_params);
     wlen = PyTuple_Size((PyObject *)wu->s_params);
@@ -600,9 +632,8 @@ shadow_richcompare(PyObject *v, PyObject *w, int op)
     Py_RETURN_FALSE; // unreachable?
 }
 
-
-static PyObject*
-PyShadow_gettp(shadowobject *self, void* closure)
+static PyObject *
+PyShadow_gettp(shadowobject *self, void *closure)
 {
     return PyLong_FromLong(self->s_tp);
 }
@@ -611,19 +642,20 @@ static PyObject *
 PyShadow__getstate__(shadowobject *self, PyObject *Py_UNUSED(ignored))
 {
     PyObject *ret, *tp;
-    
+
     tp = PyLong_FromLong(self->s_tp);
-    if (tp == NULL) {
+    if (tp == NULL)
+    {
         return NULL;
     }
-    
+
     ret = PyTuple_Pack(2, tp, (PyObject *)self->s_params); // will incref tp?
-    if (ret == NULL) {
+    if (ret == NULL)
+    {
         Py_DECREF(tp);
         return NULL;
     }
-    
-    
+
     return ret;
 }
 
@@ -639,86 +671,164 @@ static PyObject *
 shadow_setstate(shadowobject *self, PyObject *state)
 /*[clinic end generated code: output=b1b85de8af0c68a6 input=f9bb611a6b4bc293]*/
 {
+    //printf("setstate\n");
     PyObject *params, *tpitem;
     int tp = 0;
-    if (!PyTuple_CheckExact(state)) {
+    if (!PyTuple_CheckExact(state))
+    {
         return PyErr_Format(PyExc_TypeError, "ShadowType.__setstate__ received non-tuple state");
     }
-    
-    if (PyTuple_Size(state) != 2) {
+
+    if (PyTuple_Size(state) != 2)
+    {
         return PyErr_Format(PyExc_ValueError, "ShadowType.__setstate__ received tuple of wrong length");
     }
-    
+
     tpitem = PyTuple_GetItem(state, 0); // do I need to incref if I don't use it?
-    if (tpitem == NULL || !PyLong_CheckExact(tpitem)) {
+    if (tpitem == NULL || !PyLong_CheckExact(tpitem))
+    {
         return PyErr_Format(PyExc_TypeError, "tp argument of Shadow.__setstate__ is not int");
     }
     tp = PyLong_AsLong(tpitem);
-    
-    if (tp <0 || tp > PyShadow_MAXTp) {
+
+    if (tp < 0 || tp > PyShadow_MAXTp)
+    {
         return PyErr_Format(PyExc_ValueError, "__setstate__ tp is not in correct range");
     }
-    
+    //printf("setstate, tp=%d\n", tp);
     params = PyTuple_GetItem(state, 1);
-    if (tpitem == NULL || !PyTuple_CheckExact(params)) {
+    if (tpitem == NULL || !PyTuple_CheckExact(params))
+    {
         return PyErr_Format(PyExc_TypeError, "could not get params from state");
     }
-    
+
     shadowobject *ret = (shadowobject *)shadow_new_impl(&PyShadow_Type);
-    if (ret == NULL) {
+    if (ret == NULL)
+    {
         return NULL;
     }
     ret->s_tp = tp;
     Py_INCREF(params);
     Py_DECREF(ret->s_params);
     ret->s_params = (PyTupleObject *)params;
-    
+    //printf("returning ret.tp=%d\n", ret->s_tp);
     return (PyObject *)ret;
+}
+
+static PyObject *
+shadow_getitem(shadowobject *self, PyObject *key)
+{
+    /*
+    Since this isn't related to isinstance/issubclass, we do a promotion,
+    and handle self[key] in the python land
+    */
+    PyObject *promoted, *ret;
+    promoted = _get_promoted((PyObject *)self);
+    if (promoted == NULL)
+    {
+        return NULL;
+    }
+
+    ret = PyObject_GetItem(promoted, key);
+    Py_DECREF(promoted);
+    if (ret == NULL)
+    {
+        return NULL;
+    }
+    Py_INCREF(ret); // needed?
+
+    return ret;
 }
 
 static Py_hash_t
 shadow_hash(shadowobject *self)
 {
+    //printf("called shadow_hash\n");
     PyObject *tuple, *tp;
     Py_hash_t ret;
     tp = PyLong_FromLong(self->s_tp);
-    if (tp == NULL) {
+    if (tp == NULL)
+    {
         return -1;
     }
-    
+
     tuple = PyTuple_Pack(2, tp, self->s_params);
-    if (tuple == NULL) {
+    if (tuple == NULL)
+    {
         Py_DECREF(tp);
         return -1;
     }
-    
+
     ret = PyObject_Hash(tuple);
     Py_DECREF(tp);
     Py_DECREF(tuple);
     return ret;
 }
 
-static PyGetSetDef
-PyShadow_gettersetters[] = {
+static PyObject *
+shadow_reduce(shadowobject *shadow, PyObject *Py_UNUSED(ignore))
+{
+    PyObject *args, *state, *ret;
+    args = PyTuple_New(0);
+    if (args == NULL)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "Could not create args tuple");
+        return NULL;
+    }
+    state = PyShadow__getstate__(shadow, NULL);
+    if (state == NULL)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "Could not create state");
+        //Py_DECREF(args);
+        return NULL;
+    }
+
+    /*ret = Py_BuildValue("N(i)O",
+    (PyObject *)&PyShadow_Type,
+    shadow->s_tp,
+    state
+    );*/
+    ret = PyTuple_Pack(3, (PyObject *)&PyShadow_Type, args, state);
+
+    // no longer need these
+    //Py_DECREF(args);
+    Py_DECREF(state);
+
+    if (ret == NULL)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "Could not pack tuple");
+        return NULL;
+    }
+    return (PyObject *)ret;
+}
+PyDoc_STRVAR(reduce_doc, "Return state information for pickling");
+
+static PyGetSetDef PyShadow_gettersetters[] = {
     {"tp", (getter)PyShadow_gettp, NULL, "shadow type", NULL},
-    { NULL } /* sentinal */
+    {NULL} /* sentinal */
 };
 
 static PyMethodDef shadow_methods[] = {
     {"__getstate__", (PyCFunction)PyShadow__getstate__, METH_NOARGS, "__getstate__"},
     SHADOW_SETSTATE_METHODDEF
+    //{"__reduce__", (PyCFunction)shadow_reduce, METH_NOARGS, reduce_doc},
     {NULL, NULL} /* sentinal */
+};
+
+static PyMappingMethods PyShadow_mapping = {
+    .mp_subscript = (binaryfunc)shadow_getitem,
 };
 
 PyTypeObject PyShadow_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    .tp_name = "typing.ShadowType",
+    .tp_name = "typing._ShadowType",
     .tp_doc = shadow_new__doc__,
     .tp_basicsize = sizeof(shadowobject),
     .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT |Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE |Py_TPFLAGS_TYPE_SUBCLASS,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_TYPE_SUBCLASS,
     .tp_new = shadow_new,
-    
+    .tp_init = (initproc)shadow_init,
+
     .tp_alloc = PyType_GenericAlloc,
     .tp_dealloc = (destructor)shadowobject_dealloc,
     .tp_free = PyObject_GC_Del,
@@ -729,4 +839,71 @@ PyTypeObject PyShadow_Type = {
     .tp_hash = (hashfunc)shadow_hash,
     .tp_methods = shadow_methods,
     .tp_getset = PyShadow_gettersetters,
+    .tp_as_mapping = &PyShadow_mapping,
 };
+
+PyObject *
+_get_promoted(PyObject *o)
+{
+    PyObject *typing, *Union, *ForwardRef, *promoted = NULL;
+    shadowobject *shadow = (shadowobject *)o;
+    int tp = shadow->s_tp;
+    
+    if (tp == PyShadow_Base) {
+        // it was created in python land, so just return it
+        Py_INCREF(o);
+        return o;
+    }
+
+    typing = PyImport_ImportModule("typing");
+    if (typing == NULL)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "couldn't import typing");
+        return NULL;
+    }
+    
+    switch (tp) {
+        case PyShadow_UnionTp: {
+            Union = PyObject_GetAttrString(typing, "Union");
+            if (Union == NULL)
+            {
+                PyErr_SetString(PyExc_RuntimeError, "couldn't find typing.Union");
+                break;
+            }
+            // incref s_params?
+            promoted = PyObject_GetItem(Union, (PyObject *)shadow->s_params);
+            Py_DECREF(Union);
+        };
+        break;
+        case PyShadow_ForwardRefTp: {
+            if (PyTuple_Size((PyObject *)shadow->s_params) != 1) {
+                PyErr_SetString(PyExc_RuntimeError, "shadow forwardref length != 1");
+                break;
+            }
+            ForwardRef = PyObject_GetAttrString(typing, "ForwardRef");
+            if (ForwardRef == NULL) 
+            {
+                PyErr_SetString(PyExc_RuntimeError, "couldn't find typing.ForwardRef");
+                break;
+            }
+            
+            promoted = PyObject_CallFunction(ForwardRef, "O", PyTuple_GetItem((PyObject *)shadow->s_params, 0));
+            Py_DECREF(ForwardRef);
+        }
+        break;
+        default:
+            PyErr_Format(PyExc_NotImplementedError, "shadow promotion for type %i not implemented", shadow->s_tp);
+    }
+    
+    Py_DECREF(typing);
+
+    if (promoted == NULL)
+    {
+        //PyErr_SetString(PyExc_RuntimeError, "couldn't call typing._promote_shadow(shadow)");
+        return NULL;
+    }
+    Py_INCREF(promoted);
+
+    // TODO: needs incref?
+    return promoted;
+}

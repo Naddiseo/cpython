@@ -124,7 +124,11 @@ def import_module(name, package=None):
             if character != '.':
                 break
             level += 1
-    return _bootstrap._gcd_import(name[level:], package, level)
+    try:
+        return _bootstrap._gcd_import(name[level:], package, level)
+    except ValueError:
+        print(f"XXX COULDNOT IMPORT {name} {package}")
+        raise
 
 
 _RELOADING = {}

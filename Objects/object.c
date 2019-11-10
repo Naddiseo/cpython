@@ -1601,6 +1601,17 @@ none_bool(PyObject *v)
     return 0;
 }
 
+static PyObject *
+none_or(PyObject *v, PyObject *w)
+{
+    PyObject *shadow = PyShadow_Union(v, w);
+    if (shadow == NULL) {
+        PyErr_SetString(PyExc_TypeError, "could not construct shadow union in None | type");
+        return NULL;
+    }
+    return shadow;
+}
+
 static PyNumberMethods none_as_number = {
     0,                          /* nb_add */
     0,                          /* nb_subtract */
@@ -1617,7 +1628,7 @@ static PyNumberMethods none_as_number = {
     0,                          /* nb_rshift */
     0,                          /* nb_and */
     0,                          /* nb_xor */
-    0,                          /* nb_or */
+    (binaryfunc)none_or,        /* nb_or */
     0,                          /* nb_int */
     0,                          /* nb_reserved */
     0,                          /* nb_float */

@@ -8,7 +8,7 @@ extern "C" {
 
 PyAPI_DATA(PyTypeObject) PyShadow_Type;
 PyAPI_FUNC(PyObject *) PyShadow_Union(PyObject *target, PyObject *alias);
-PyAPI_FUNC(PyObject *) PyShadow_FordwardRef(PyObject *ref);
+PyAPI_FUNC(PyObject *) PyShadow_ForwardRef(PyObject *ref);
 PyAPI_FUNC(PyObject *) PyShadow_UnionAsTuple(PyObject * self);
 #define PyShadow_CheckExact(op) (Py_TYPE(op) == &PyShadow_Type)
 #ifdef __cplusplus

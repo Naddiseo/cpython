@@ -45,6 +45,14 @@ class BaseTestCase(TestCase):
             if msg is not None:
                 message += ' : %s' % msg
             raise self.failureException(message)
+    
+    def assertPromoted(self, cls, msg=None):
+        self.assertIsNot(type(cls), typing._ShadowType)
+        self.assertIs(type(cls), typing._GenericAlias)
+
+    def assertNotPromoted(self, cls, msg=None):
+        self.assertIsNot(type(cls), typing._GenericAlias, msg)
+        self.assertIs(type(cls), typing._ShadowType)
 
     def clear_caches(self):
         for f in typing._cleanups:
@@ -181,10 +189,33 @@ class TypeVarTests(BaseTestCase):
         self.assertEqual(Union[X, int].__args__, (X, int))
         self.assertEqual(Union[X, int].__parameters__, (X,))
         self.assertIs(Union[X, int].__origin__, Union)
+    
+    def test_union_or_unique(self):
+        X = TypeVar('X')
+        Y = TypeVar('Y')
+        union_X_int = int | X
+        self.assertNotPromoted(union_X_int)
+        
+        self.assertNotEqual(X, Y)
+        self.assertEqual(X | X, X)
+        self.assertNotEqual(union_X_int, Union[X])
+        self.assertNotEqual(union_X_int, Union[int])
+        self.assertNotEqual(union_X_int, X)
+        self.assertNotEqual(union_X_int, int)
+        self.assertEqual(typing.get_args(union_X_int), (int, X))
+        #self.assertEqual(union_X_int, (X,)) # no way to get type vars via function
+        self.assertIs(typing.get_origin(union_X_int), Union)
 
     def test_union_constrained(self):
         A = TypeVar('A', str, bytes)
         self.assertNotEqual(Union[A, str], Union[A])
+    
+    def test_union_or_constrained(self):
+        A = TypeVar('A', str, bytes)
+        self.assertNotEqual(A | str, Union[A])
+        self.assertNotEqual(A | str, A)
+        self.assertNotEqual(A | str, str)
+        self.assertNotEqual(A | str, bytes)
 
     def test_repr(self):
         self.assertEqual(repr(T), '~T')
@@ -230,6 +261,10 @@ class UnionTests(BaseTestCase):
     def test_basics(self):
         u = Union[int, float]
         self.assertNotEqual(u, Union)
+        u2 = int | float
+        self.assertNotEqual(u2, Union)
+        
+        self.assertIsNot(type(u), type(u2), "is not promoted")
 
     def test_subclass_error(self):
         with self.assertRaises(TypeError):
@@ -238,6 +273,13 @@ class UnionTests(BaseTestCase):
             issubclass(Union, int)
         with self.assertRaises(TypeError):
             issubclass(Union[int, str], int)
+        with self.assertRaises(TypeError):
+            issubclass(Union[int, str], int)
+        with self.assertRaises(TypeError):
+            issubclass(int, Union[int, str])
+    
+    #def test_isinstance(self):
+        
 
     def test_union_any(self):
         u = Union[Any]
@@ -263,6 +305,10 @@ class UnionTests(BaseTestCase):
         u1 = Union[int, float]
         u2 = Union[float, int]
         self.assertEqual(u1, u2)
+        
+        u3 = int | float
+        u4 = float | int
+        self.assertEqual(u3, u4)
 
     def test_single_class_disappears(self):
         t = Union[Employee]
@@ -278,6 +324,15 @@ class UnionTests(BaseTestCase):
         u = Union[int, float]
         v = Union[u, Employee]
         self.assertEqual(v, Union[int, float, Employee])
+        
+        u2 = int | float
+        v2 = u2 | Employee
+        self.assertNotPromoted(u2)
+        self.assertNotPromoted(v2)
+        
+        self.assertEqual(v2, int|float|Employee)
+        self.assertEqual(v2, v)
+        
 
     def test_repr(self):
         self.assertEqual(repr(Union), 'typing.Union')
@@ -301,6 +356,9 @@ class UnionTests(BaseTestCase):
         with self.assertRaises(TypeError):
             class C(Union[int, str]):
                 pass
+        with self.assertRaises(TypeError):
+            class C(int | str):
+                pass
 
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
@@ -312,6 +370,9 @@ class UnionTests(BaseTestCase):
             u()
         with self.assertRaises(TypeError):
             type(u)()
+        ou = int | float
+        with self.assertRaises(TypeError):
+            ou()
 
     def test_union_generalization(self):
         self.assertFalse(Union[str, typing.Iterable[int]] == str)
@@ -332,15 +393,32 @@ class UnionTests(BaseTestCase):
         o = Optional[int]
         u = Union[int, None]
         self.assertEqual(o, u)
+        
+        u2 = int | None
+        self.assertEqual(u2, o)
 
     def test_empty(self):
         with self.assertRaises(TypeError):
             Union[()]
+        with self.assertRaises(TypeError):
+            int | ()
 
     def test_no_eval_union(self):
         u = Union[int, str]
         def f(x: u): ...
         self.assertIs(get_type_hints(f)['x'], u)
+        
+        u2 = int | str
+        self.assertNotPromoted(u2)
+        
+        def f2(x: u2): ...
+        hints = get_type_hints(f)
+        
+        x = hints['x']
+        self.assertPromoted(x)
+        
+        # Use == because the promotion makes them not "is"-equal
+        self.assertEqual(x, u2)
 
     def test_function_repr_union(self):
         def fun() -> int: ...
@@ -364,6 +442,47 @@ class UnionTests(BaseTestCase):
             return Element(*args)
 
         Union[Elem, str]  # Nor should this
+    
+    def test_union_forward_ref(self):
+        u = Union['A', 'B']
+        
+        # should be able to construct with union or
+        u2 = 'A' | 'B'
+        self.assertNotPromoted(u2)
+        self.assertEqual(u, u2)
+        
+        class A: pass
+        class B: pass
+    
+    def test_union_or_promotion(self):
+        T = TypeVar('T')
+        
+        # str | type should create shadow[shadowforwardref[str], type]
+        # tests str.__or__
+        x = "fowardref" | int
+        self.assertNotPromoted(x)
+        
+        # strA | strA should return shadow_fowardref[strA]
+        x = "A" | "A"
+        self.assertNotPromoted(x)
+        
+        # None | type should create shadow[NoneType, type]
+        # as mirror for (Optional) type | None
+        # tests NoneType.__or__
+        x = None | int
+        self.assertNotPromoted(x)
+    
+    def test_pickle(self):
+        # this test is expected to fail/die
+        x = int | str
+        self.assertNotPromoted(x)
+        y = pickle.dumps(x)
+        z = pickle.loads(y)
+        
+        self.assertEqual(repr(x), "typing.Union[int, str]") # should not raise
+        self.assertEqual(repr(z), "typing.Union[int, str]")
+        
+        
 
 
 class TupleTests(BaseTestCase):
@@ -1862,7 +1981,7 @@ class GenericTests(BaseTestCase):
             self.assertEqual(x.__dict__, {'foo': 42, 'bar': 'abc'})
         samples = [Any, Union, Tuple, Callable, ClassVar,
                    Union[int, str], ClassVar[List], Tuple[int, ...], Callable[[str], bytes],
-                   typing.DefaultDict, typing.FrozenSet[int], int|str]
+                   typing.DefaultDict, typing.FrozenSet[int]]
         for s in samples:
             for proto in range(pickle.HIGHEST_PROTOCOL + 1):
                 z = pickle.dumps(s, proto)

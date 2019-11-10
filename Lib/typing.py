@@ -40,7 +40,6 @@ __all__ = [
     'Literal',
     'Optional',
     'Protocol',
-    'ShadowType', 
     'Tuple',
     'Type',
     'TypeVar',
@@ -117,20 +116,27 @@ __all__ = [
 # namespace, but excluded from __all__ because they might stomp on
 # legitimate imports of those modules.
 
-ShadowType = shadowobject # base type that gets checked
+_ShadowType = shadowobject # base type that gets checked
+        
 
 def _promote_shadow(shadow):
-    PyShadow_Base = 0
+    PyShadow_Base = 0 # indicates it was constructed from this file
     PyShadow_UnionTp = 1
     PyShadow_ForwardRefTp = 2
-    
-    if isinstance(shadow, ShadowType):
+    PyShadow_TypeVarTp = 3
+    #print("_promote_shadow", type(shadow))
+    if type(shadow) == _ShadowType:
         if shadow.tp == PyShadow_Base:
             return shadow
         if shadow.tp == PyShadow_UnionTp:
             return Union[tuple(shadow)]
-        #elif shadow.tp == PyShadow_ForwardRefTp:
-        #    return ForwardRef[tuple(shadow)]
+        elif shadow.tp == PyShadow_ForwardRefTp:
+            params = tuple(shadow)
+            assert len(params)==1, len(params)
+            return params[0]
+        elif shadow.tp == PyShadow_TypeVarTp:
+            assert False, "not implemented yet"
+            return shadow
         assert False, "invalid shadow type"
     return shadow
 
@@ -284,8 +290,7 @@ def _eval_type(t, globalns, localns):
     """Evaluate all forward reverences in the given type t.
     For use of globalns and localns see the docstring for get_type_hints().
     """
-    if isinstance(t, ShadowType):
-        t = _promote_shadow(t)
+    t = _promote_shadow(t)
     if isinstance(t, ForwardRef):
         return t._evaluate(globalns, localns)
     if isinstance(t, _GenericAlias):
@@ -516,7 +521,6 @@ class ForwardRef(_Final, _root=True):
     def __init__(self, arg, is_argument=True):
         if not isinstance(arg, str):
             raise TypeError(f"Forward reference must be a string -- got {arg!r}")
-        arg = _promote_shadow(arg)
         try:
             code = compile(arg, '<string>', 'eval')
         except SyntaxError:
@@ -557,7 +561,7 @@ class ForwardRef(_Final, _root=True):
         return f'ForwardRef({self.__forward_arg__!r})'
 
 
-class TypeVar(_Final, _Immutable, ShadowType, _root=True):
+class TypeVar(_Final, _Immutable, _ShadowType, _root=True):
     """Type variable.
 
     Usage::
@@ -606,6 +610,7 @@ class TypeVar(_Final, _Immutable, ShadowType, _root=True):
 
     def __init__(self, name, *constraints, bound=None,
                  covariant=False, contravariant=False):
+        _ShadowType.__init__(self, 0)
         self.__name__ = name
         if covariant and contravariant:
             raise ValueError("Bivariant types are not supported.")
@@ -625,10 +630,11 @@ class TypeVar(_Final, _Immutable, ShadowType, _root=True):
         if def_mod != 'typing':
             self.__module__ = def_mod
 
-    def __or__(self,right):
-        return Union[self,right]
-    def __ror__(self,right):
-        return Union[self,right]
+    def __or__(self, right):
+        return Union[self, right]
+
+    def __ror__(self, left):
+        return Union[left, self]
 
     def __repr__(self):
         if self.__covariant__:
@@ -670,7 +676,7 @@ def _is_dunder(attr):
     return attr.startswith('__') and attr.endswith('__')
 
 
-class _GenericAlias(_Final, ShadowType, _root=True):
+class _GenericAlias(_Final, _ShadowType, _root=True):
     """The central part of internal API.
 
     This represents a generic version of type 'origin' with type arguments 'params'.
@@ -685,10 +691,13 @@ class _GenericAlias(_Final, ShadowType, _root=True):
         if special and name is None:
             orig_name = origin.__name__
             name = _normalize_alias.get(orig_name, orig_name)
+        
+        
+        
         self._name = name
         if not isinstance(params, tuple):
             params = (params,)
-        self.__origin__ = origin
+        self.__origin__ = _promote_shadow(origin)
         self.__args__ = tuple(... if a is _TypingEllipsis else
                               () if a is _TypingEmpty else
                               _promote_shadow(a) for a in params)
@@ -696,11 +705,17 @@ class _GenericAlias(_Final, ShadowType, _root=True):
         self.__slots__ = None  # This is not documented.
         if not name:
             self.__module__ = origin.__module__
+        shadow_type_map = {
+            Union: 1,
+        }
+        _ShadowType.__init__(self, shadow_type_map.get(origin, 0))
+        
 
-    def __or__(self,right):
-        return Union[self,right]
-    def __ror__(self,right):
-        return Union[self,right]
+    def __or__(self, right):
+        return Union[self, right]
+    
+    def __ror__(self, left):
+        return Union[left, self]
 
     @_tp_cache
     def __getitem__(self, params):
@@ -737,8 +752,7 @@ class _GenericAlias(_Final, ShadowType, _root=True):
                 f'{_type_repr(self.__args__[-1])}]')
 
     def __eq__(self, other):
-        if isinstance(other, ShadowType):
-            other = _promote_shadow(other)
+        other = _promote_shadow(other)
 
         if not isinstance(other, _GenericAlias):
             return NotImplemented
