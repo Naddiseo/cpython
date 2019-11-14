@@ -477,14 +477,14 @@ class UnionTests(BaseTestCase):
         self.assertNotPromoted(x)
     
     def test_pickle(self):
-        # TODO: this test is expected to fail/die at the moment..
         x = int | str
         self.assertNotPromoted(x)
         y = pickle.dumps(x)
         z = pickle.loads(y)
+        self.assertNotPromoted(z)
         
-        self.assertEqual(repr(x), "typing.Union[int, str]") # should not raise
-        self.assertEqual(repr(z), "typing.Union[int, str]")
+        self.assertEqual(repr(x), "ShadowUnion[(<class 'int'>, <class 'str'>)]")
+        self.assertEqual(repr(z), "ShadowUnion[(<class 'int'>, <class 'str'>)]")
         
         
 

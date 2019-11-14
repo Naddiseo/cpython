@@ -72,4 +72,37 @@ PyDoc_STRVAR(shadow_setstate__doc__,
 
 #define SHADOW_SETSTATE_METHODDEF    \
     {"__setstate__", (PyCFunction)shadow_setstate, METH_O, shadow_setstate__doc__},
-/*[clinic end generated code: output=7b999ac39c236fdf input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(shadow_unpickle__doc__,
+"_unpickle($type, /, tup, state)\n"
+"--\n"
+"\n");
+
+#define SHADOW_UNPICKLE_METHODDEF    \
+    {"_unpickle", (PyCFunction)(void(*)(void))shadow_unpickle, METH_FASTCALL|METH_KEYWORDS|METH_CLASS, shadow_unpickle__doc__},
+
+static PyObject *
+shadow_unpickle_impl(PyTypeObject *type, PyObject *tup, PyObject *state);
+
+static PyObject *
+shadow_unpickle(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    static const char * const _keywords[] = {"tup", "state", NULL};
+    static _PyArg_Parser _parser = {NULL, _keywords, "_unpickle", 0};
+    PyObject *argsbuf[2];
+    PyObject *tup;
+    PyObject *state;
+
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser, 2, 2, 0, argsbuf);
+    if (!args) {
+        goto exit;
+    }
+    tup = args[0];
+    state = args[1];
+    return_value = shadow_unpickle_impl(type, tup, state);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=a51701056dceb3a3 input=a9049054013a1b77]*/

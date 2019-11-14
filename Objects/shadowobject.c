@@ -436,7 +436,7 @@ PyShadow_ForwardRef(PyObject *ref_str)
     }
 
     Py_INCREF(params);
-    shadow->s_params = params;
+    shadow->s_params = (PyTupleObject *)params;
 
     return (PyObject *)shadow;
 }
@@ -511,26 +511,66 @@ shadowobject_traverse(shadowobject *shadow, visitproc visit, void *arg)
 static PyObject *
 shadow_repr(shadowobject *shadow)
 {
-    /* since repr is "debug" function, and out of scope for isinstance/issubclass
-       we can import the typing module here, and do a promotion to typing.Union
-    */
-    PyObject *promoted, *s;
-    //printf("called shadow_repr %p\n", shadow);
-    // TODO: this is causing an infinite recursion from pickling
-    promoted = _get_promoted((PyObject *)shadow);
-    if (promoted == NULL)
+   Py_ssize_t i;
+    _PyUnicodeWriter writer;
+
+    i = Py_ReprEnter((PyObject *)shadow);
+    if (i != 0)
     {
-        return NULL;
+        return i > 0 ? PyUnicode_FromString("...") : NULL;
     }
-    /*int x = PyObject_IsInstance(promoted, &PyShadow_Type);
-    if (x > 0) {
-        printf("after promotion %p shadow is still shadow type with tp=%d\n", shadow, shadow->s_tp);
-    }*/
+    _PyUnicodeWriter_Init(&writer);
+    writer.overallocate = 1; // TODO
+    /* "<ShadowType>" */
+    writer.min_length = 12;
+    
+    if (shadow->s_tp == PyShadow_Base) {
+        if (_PyUnicodeWriter_WriteASCIIString(&writer, "<ShadowType>", 12) < 0)
+        {
+            goto error;
+        }
+        goto end;
+    }
+    else if (shadow->s_tp == PyShadow_UnionTp) {
+        if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowUnion[", 12) < 0)
+        {
+            goto error;
+        }
+    }
+    else if (shadow->s_tp == PyShadow_ForwardRefTp) {
+        if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowForwardRef[", 17) < 0)
+        {
+            goto error;
+        }
+    }
+    else {
+        goto error;
+    }
 
-    s = PyObject_Repr(promoted);
-    Py_DECREF(promoted);
 
-    return s;
+    PyObject *s;
+    s = PyObject_Repr((PyObject *)shadow->s_params);
+    if (s == NULL) {
+        goto error;
+    }
+    if (_PyUnicodeWriter_WriteStr(&writer, s) < 0)
+    {
+        Py_DECREF(s);
+        goto error;
+    }
+    Py_DECREF(s);
+
+    if (_PyUnicodeWriter_WriteChar(&writer, ']') < 0)
+    {
+        goto error;
+    }
+end:
+    Py_ReprLeave((PyObject *)shadow);
+    return _PyUnicodeWriter_Finish(&writer);
+error:
+    _PyUnicodeWriter_Dealloc(&writer);
+    Py_ReprLeave((PyObject *)shadow);
+    return NULL;
 }
 
 PyObject *
@@ -674,6 +714,10 @@ shadow_setstate(shadowobject *self, PyObject *state)
     //printf("setstate\n");
     PyObject *params, *tpitem;
     int tp = 0;
+    
+    if (self == NULL) {
+        return NULL;
+    }
     if (!PyTuple_CheckExact(state))
     {
         return PyErr_Format(PyExc_TypeError, "ShadowType.__setstate__ received non-tuple state");
@@ -701,18 +745,19 @@ shadow_setstate(shadowobject *self, PyObject *state)
     {
         return PyErr_Format(PyExc_TypeError, "could not get params from state");
     }
-
+/*
     shadowobject *ret = (shadowobject *)shadow_new_impl(&PyShadow_Type);
     if (ret == NULL)
     {
         return NULL;
     }
-    ret->s_tp = tp;
+    */
+    self->s_tp = tp;
     Py_INCREF(params);
-    Py_DECREF(ret->s_params);
-    ret->s_params = (PyTupleObject *)params;
+    Py_DECREF(self->s_params);
+    self->s_params = (PyTupleObject *)params;
     //printf("returning ret.tp=%d\n", ret->s_tp);
-    return (PyObject *)ret;
+    return (PyObject *)self;
 }
 
 static PyObject *
@@ -768,30 +813,37 @@ shadow_hash(shadowobject *self)
 static PyObject *
 shadow_reduce(shadowobject *shadow, PyObject *Py_UNUSED(ignore))
 {
-    PyObject *args, *state, *ret;
+    PyObject *fn, *args, *state, *ret;
+    
+    fn = PyObject_GetAttrString((PyObject *)&PyShadow_Type, "_unpickle");
+    if (fn == NULL) {
+        //PyErr_SetString(PyExc_RuntimeError, "Could not find ShadowType._unpickle");
+        return NULL;
+    }
+    
     args = PyTuple_New(0);
     if (args == NULL)
     {
         PyErr_SetString(PyExc_RuntimeError, "Could not create args tuple");
+        Py_DECREF(fn);
         return NULL;
     }
     state = PyShadow__getstate__(shadow, NULL);
     if (state == NULL)
     {
         PyErr_SetString(PyExc_RuntimeError, "Could not create state");
-        //Py_DECREF(args);
+        Py_DECREF(fn);
+        Py_DECREF(args);
         return NULL;
     }
 
-    /*ret = Py_BuildValue("N(i)O",
-    (PyObject *)&PyShadow_Type,
-    shadow->s_tp,
-    state
-    );*/
-    ret = PyTuple_Pack(3, (PyObject *)&PyShadow_Type, args, state);
+    
+    //ret = PyTuple_Pack(3, fn, args, state);
+    ret = Py_BuildValue("(O(OO))", fn, args, state);
 
     // no longer need these
-    //Py_DECREF(args);
+    Py_DECREF(fn);
+    Py_DECREF(args);
     Py_DECREF(state);
 
     if (ret == NULL)
@@ -803,6 +855,27 @@ shadow_reduce(shadowobject *shadow, PyObject *Py_UNUSED(ignore))
 }
 PyDoc_STRVAR(reduce_doc, "Return state information for pickling");
 
+/*[clinic input]
+@classmethod
+shadowobject._unpickle as shadow_unpickle
+
+    tup: 'O'
+    state: 'O'
+
+[clinic start generated code]*/
+
+static PyObject *
+shadow_unpickle_impl(PyTypeObject *type, PyObject *tup, PyObject *state)
+/*[clinic end generated code: output=f493457202450a90 input=e69aab13f29db555]*/
+{
+    shadowobject* shadow = (shadowobject *)shadow_new_impl(type);
+    if (shadow == NULL) {
+        return NULL;
+    }
+    shadow = (shadowobject *)shadow_setstate(shadow, state);
+    return (PyObject *)shadow;
+}
+
 static PyGetSetDef PyShadow_gettersetters[] = {
     {"tp", (getter)PyShadow_gettp, NULL, "shadow type", NULL},
     {NULL} /* sentinal */
@@ -810,8 +883,9 @@ static PyGetSetDef PyShadow_gettersetters[] = {
 
 static PyMethodDef shadow_methods[] = {
     {"__getstate__", (PyCFunction)PyShadow__getstate__, METH_NOARGS, "__getstate__"},
+    SHADOW_UNPICKLE_METHODDEF
     SHADOW_SETSTATE_METHODDEF
-    //{"__reduce__", (PyCFunction)shadow_reduce, METH_NOARGS, reduce_doc},
+    {"__reduce__", (PyCFunction)shadow_reduce, METH_NOARGS, reduce_doc},
     {NULL, NULL} /* sentinal */
 };
 

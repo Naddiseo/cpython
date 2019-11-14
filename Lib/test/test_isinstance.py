@@ -214,6 +214,8 @@ class TestIsInstanceIsSubclass(unittest.TestCase):
         self.assertEqual(False, isinstance(None, str | int))
         self.assertEqual(True, isinstance(3, str | int))
         self.assertEqual(True, isinstance("", str | int))
+        self.assertEqual(True, isinstance("", str | None))
+        self.assertEqual(True, isinstance("", None | str))
         with self.assertRaises(TypeError):
             isinstance([], typing.Union[typing.List[int],typing.Tuple[int]])
         with self.assertRaises(TypeError):
@@ -226,6 +228,16 @@ class TestIsInstanceIsSubclass(unittest.TestCase):
             isinstance(2, typing.List | int)
         with self.assertRaises(TypeError):
             isinstance(2, typing.List | typing.Tuple)
+        
+        self.assertEqual(True, isinstance([], list | tuple))
+        self.assertEqual(True, isinstance([], tuple | list))
+        self.assertEqual(True, isinstance((), tuple | list))
+        self.assertEqual(True, isinstance((), None | tuple))
+        
+        self.assertEqual(True, isinstance([], list|'T'))
+        self.assertEqual(True, isinstance([], 'T'|list))
+        
+        class T: pass
 
     def test_subclass_normal(self):
         # normal classes
