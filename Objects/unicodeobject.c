@@ -14045,23 +14045,11 @@ unicode_mod(PyObject *v, PyObject *w)
     return PyUnicode_Format(v, w);
 }
 
-static PyObject *
-unicode_or(PyObject *v, PyObject *w)
-{
-    PyObject *shadow = PyShadow_Union(v, w);
-    if (shadow == NULL) {
-        PyErr_SetString(PyExc_TypeError, "could not construct shadow union in str | type");
-        return NULL;
-    }
-    return shadow;
-}
-
 static PyNumberMethods unicode_as_number = {
     0,              /*nb_add*/
     0,              /*nb_subtract*/
     0,              /*nb_multiply*/
     unicode_mod,            /*nb_remainder*/
-    .nb_or = (binaryfunc)unicode_or,
 };
 
 static PySequenceMethods unicode_as_sequence = {

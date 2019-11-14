@@ -3538,6 +3538,14 @@ type___sizeof___impl(PyTypeObject *self)
     return PyLong_FromSsize_t(size);
 }
 
+static PyObject * type_or(PyTypeObject *self, PyObject *other);
+
+static PyObject *
+type_ror(PyTypeObject *self, PyObject *other)
+{
+    return type_or(self, other);
+}
+
 static PyMethodDef type_methods[] = {
     TYPE_MRO_METHODDEF
     TYPE___SUBCLASSES___METHODDEF
@@ -3549,6 +3557,7 @@ static PyMethodDef type_methods[] = {
     TYPE___SUBCLASSCHECK___METHODDEF
     TYPE___DIR___METHODDEF
     TYPE___SIZEOF___METHODDEF
+    {"__ror__", (PyCFunction)type_ror, METH_FASTCALL|METH_CLASS, PyDoc_STR("__ror__() -> shadow")},
     {0}
 };
 

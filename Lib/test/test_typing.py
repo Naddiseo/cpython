@@ -454,26 +454,30 @@ class UnionTests(BaseTestCase):
         class A: pass
         class B: pass
     
-    def test_union_or_promotion(self):
-        T = TypeVar('T')
-        
+    def test_str_or_type(self):
         # str | type should create shadow[shadowforwardref[str], type]
         # tests str.__or__
         x = "fowardref" | int
         self.assertNotPromoted(x)
         
-        # strA | strA should return shadow_fowardref[strA]
-        x = "A" | "A"
+        x = "forwardref" | None # aka Optional["forwardref"]
         self.assertNotPromoted(x)
         
+        # strA | strA should return shadow_fowardref[strA]
+        x = "A" | "A" # aka Union["A", "A"] -> "A"
+        self.assertNotPromoted(x)
+    
+    def test_none_or_type(self):
         # None | type should create shadow[NoneType, type]
         # as mirror for (Optional) type | None
-        # tests NoneType.__or__
         x = None | int
+        self.assertNotPromoted(x)
+        
+        x = None | "forwardref"
         self.assertNotPromoted(x)
     
     def test_pickle(self):
-        # this test is expected to fail/die
+        # TODO: this test is expected to fail/die at the moment..
         x = int | str
         self.assertNotPromoted(x)
         y = pickle.dumps(x)
