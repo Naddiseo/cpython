@@ -236,6 +236,7 @@ class TestIsInstanceIsSubclass(unittest.TestCase):
         
         self.assertEqual(True, isinstance([], list|'T'))
         self.assertEqual(True, isinstance([], 'T'|list))
+        self.assertEqual(True, isinstance([], typing.Union[tuple, list])) #TODO?
         
         class T: pass
 

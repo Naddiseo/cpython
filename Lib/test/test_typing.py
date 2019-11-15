@@ -333,6 +333,12 @@ class UnionTests(BaseTestCase):
         self.assertEqual(v2, int|float|Employee)
         self.assertEqual(v2, v)
         
+        x = int | Union[int, str]
+        self.assertNotPromoted(x) # type.__or__(Union[int,str]) -> shadow
+        shadow_args = tuple(x)
+        self.assertEqual(2, len(shadow_args))
+        self.assertEqual(set(shadow_args), {int, str})
+        
 
     def test_repr(self):
         self.assertEqual(repr(Union), 'typing.Union')
@@ -453,6 +459,44 @@ class UnionTests(BaseTestCase):
         
         class A: pass
         class B: pass
+
+class TestUnionOr(BaseTestCase):
+    
+    def test_shadow_type(self):
+        x = int|'ref'
+        T = TypeVar('T')
+        self.assertEqual(T._shadow_type, x.FLAG_TYPEVAR)
+        
+        F = typing.ForwardRef('ref')
+        self.assertEqual(F._shadow_type, x.FLAG_FORWARDREF)
+        
+        t = Tuple[F, T]
+        self.assertIsInstance(t, typing._ShadowType)
+        self.assertTrue(hasattr(t, '_shadow_args'))
+    
+    def test_union_union(self):
+        x = int | str
+        y = float | bytes
+        
+        self.assertNotPromoted(x)
+        self.assertNotPromoted(y)
+        
+        z = x | y
+        
+        self.assertNotPromoted(z)
+        
+        args = set(z._shadow_args)
+        self.assertEqual(args, { int, str, float, bytes })
+        
+    def test_regr1(self):
+        T = TypeVar('T')
+        t = Tuple[T, int]
+        x = int | t
+        self.assertNotPromoted(x)
+        
+        self.assertEqual(x._shadow_origin, x.FLAG_C)
+        self.assertEqual(x._shadow_type, x.FLAG_UNION)
+        self.assertEqual(set(x._shadow_args), {int, t})
     
     def test_str_or_type(self):
         # str | type should create shadow[shadowforwardref[str], type]
@@ -485,8 +529,17 @@ class UnionTests(BaseTestCase):
         
         self.assertEqual(repr(x), "ShadowUnion[(<class 'int'>, <class 'str'>)]")
         self.assertEqual(repr(z), "ShadowUnion[(<class 'int'>, <class 'str'>)]")
+    
+    def test_typevar_sub(self):
+        T = TypeVar('T')
+        x = int | T | 'C'
+        self.assertNotPromoted(x)
         
-        
+        y = x[str]
+        self.assertPromoted(y) # TODO: Might need to change this if substitution goes into c
+        self.assertEqual(y, Union[str, int, 'C'])
+        class C:pass
+    
 
 
 class TupleTests(BaseTestCase):
@@ -1985,7 +2038,7 @@ class GenericTests(BaseTestCase):
             self.assertEqual(x.__dict__, {'foo': 42, 'bar': 'abc'})
         samples = [Any, Union, Tuple, Callable, ClassVar,
                    Union[int, str], ClassVar[List], Tuple[int, ...], Callable[[str], bytes],
-                   typing.DefaultDict, typing.FrozenSet[int]]
+                   typing.DefaultDict, typing.FrozenSet[int], int|str]
         for s in samples:
             for proto in range(pickle.HIGHEST_PROTOCOL + 1):
                 z = pickle.dumps(s, proto)
@@ -2002,7 +2055,7 @@ class GenericTests(BaseTestCase):
     def test_copy_and_deepcopy(self):
         T = TypeVar('T')
         class Node(Generic[T]): ...
-        things = [T|int, Union[T, int], Tuple[T, int], Callable[..., T], Callable[[int], int],
+        things = [T|int, int|str, Union[T, int], Tuple[T, int], Callable[..., T], Callable[[int], int],
                   Tuple[Any, Any], Node[T], Node[int], Node[Any], typing.Iterable[T],
                   typing.Iterable[Any], typing.Iterable[int], typing.Dict[int, str],
                   typing.Dict[T, Any], ClassVar[int], ClassVar[List[T]], Tuple['T', 'T'],

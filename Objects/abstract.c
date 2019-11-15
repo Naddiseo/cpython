@@ -2492,7 +2492,11 @@ union_to_tuple(PyObject* cls) {
     }*/
     if (Py_TYPE(cls) == &PyShadow_Type) {
         // TODO: type check shadow type
-        return PyShadow_UnionAsTuple(cls);
+        PyObject *tuple = PyShadow_UnionAsTuple(cls);
+        if (tuple != NULL) {
+            // incref tuple?
+            cls = tuple;
+        }
     }
     return cls;
 }

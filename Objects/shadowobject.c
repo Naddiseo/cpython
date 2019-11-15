@@ -2,6 +2,7 @@
   typing.py should promote it to an actual type when encountered */
 
 #include "Python.h"
+#include "structmember.h"
 
 // Dummy Type to use in typing.py
 /*[clinic input]
@@ -11,19 +12,63 @@ class shadowobject "shadowobject *" "&PyShadow_Type"
 typedef struct
 {
     PyObject_HEAD
-    int s_tp;  // the type
-    PyTupleObject *s_params; /* tuple of params */
+    int s_flags; // the type
+    PyTupleObject *s_params;   /* tuple of params */
 } shadowobject;
 
 #include "clinic/shadowobject.c.h"
 
-#define PyShadow_Base 0
-#define PyShadow_UnionTp 1
-#define PyShadow_ForwardRefTp 2
-#define PyShadow_TypeVarTp 3
-#define PyShadow_MAXTp 3
+/*
+The flags field is used to indicate where the object came from (eg promoted),
+and what type it is.
+32 .....            1 0
++-----------+-------+-+
+| undefined |7654321|0|
++-----------+-------+-+
+      ^        ^     ^
+      |        |     +-> 1 bit for created in C vs python flag
+      |        +-------> 7 bits for the type
+      +----------------> all other bits are undefined for now
+
+The lowest bit tells us if the object was created in the interpreter, or from python
+The next 4 lowest bits are the "type", eg Union vs ForwardRef vs TypeVar
+All other bits are undefined for now
+
+This layout/flags allows for flags == 0 to be the default for 
+unions created in typing.py (eg, typing.Union has flags == 0)
+*/
+#define PyShadow_FlagPy 0 // created in python land
+#define PyShadow_FlagC  1  // created in C land
+#define PyShadow_FlagUnion      (0 << 1)
+#define PyShadow_FlagForwardRef (1 << 1)
+#define PyShadow_FlagTypeVar    (2 << 1)
+
+// the following might be moved into another bit
+#define PyShadow_FlagBasicType (126 << 1) // aka any other type that we're not interested in (used internally)
+#define PyShadow_FlagInvalid   (127 << 1) // used internally
+
+// the positions
+#define PyShadow_MaskOrigin 0x01 // just the lowest bit // TODO: another name?
+#define PyShadow_MaskType   0xfe // the 7 bits after the first
+
+#define SHADOW_FLAGS(shadow) ( ((shadowobject *)shadow)->s_flags )
+
+#define _IS_PY(flags) ( (flags & PyShadow_MaskOrigin) == PyShadow_FlagPy )
+#define _IS_C(flags)  ( (flags & PyShadow_MaskOrigin) == PyShadow_FlagC )
+#define _IS_TYPE_UNION(flags)      ( (flags & PyShadow_MaskType) == PyShadow_FlagUnion )
+#define _IS_TYPE_FORWARDREF(flags) ( (flags & PyShadow_MaskType) == PyShadow_FlagForwardRef )
+#define _IS_TYPE_TYPEVAR(flags)    ( (flags & PyShadow_MaskType) == PyShadow_FlagTypeVar )
+#define _IS_TYPE_BASIC(flags)      ( (flags & PyShadow_MaskType) == PyShadow_FlagBasicType )
+#define _IS_TYPE_INVALID(flags)    ( (flags & PyShadow_MaskType) == PyShadow_FlagInvalid )
+
+#define IS_PY(shadow) (_IS_PY(SHADOW_FLAGS(shadow)))
+#define IS_C(shadow)  (_IS_C(SHADOW_FLAGS(shadow)))
+#define IS_TYPE_UNION(shadow)      (_IS_TYPE_UNION(SHADOW_FLAGS(shadow)))
+#define IS_TYPE_FORWARDREF(shadow) (_IS_TYPE_FORWARDREF(SHADOW_FLAGS(shadow)))
+#define IS_TYPE_TYPEVAR(shadow)    (_IS_TYPE_TYPEVAR(SHADOW_FLAGS(shadow)))
 
 PyObject *_get_promoted(PyObject *shadow);
+PyObject *_get_union_args(PyObject *shadow);
 
 Py_ssize_t
 _is_same_type(PyObject *lhs, PyObject *rhs)
@@ -42,17 +87,17 @@ _is_same_type(PyObject *lhs, PyObject *rhs)
 }
 
 Py_ssize_t
-union_check_in(shadowobject *s, PyObject *needle)
+union_check_in(PyObject *tuple, PyObject *needle)
 {
     // return 1 if needle is in un.un_params, else -1
-    Py_ssize_t len = PyTuple_Size((PyObject *)s->s_params);
+    Py_ssize_t len = PyTuple_Size(tuple);
     if (len == 0)
     {
         return -1;
     }
     for (Py_ssize_t i = 0; i < len; i++)
     {
-        PyObject *other = PyTuple_GetItem((PyObject *)s->s_params, i);
+        PyObject *other = PyTuple_GetItem(tuple, i);
         if (other == NULL)
         {
             return -1;
@@ -65,49 +110,66 @@ union_check_in(shadowobject *s, PyObject *needle)
     return -1;
 }
 
-Py_ssize_t
-typ_check(PyObject *thing)
+PyObject *
+normalize_arg(PyObject *arg, int *flags)
 {
-    // return 1 if thing is None, callable, other shadow type, or type
-    // return 2 for shadow union
-    // return 3 for string
-    // returns -1 for anything else
-
-    //returns -1 if thing is not a type, None, or union
-    if (thing == NULL)
-    {
-        return -1;
+    PyObject *tmp = NULL;
+    if (arg == NULL) {
+        *flags = PyShadow_FlagC | PyShadow_FlagInvalid;
+        return NULL;
     }
-    if (thing == Py_None)
-    {
-        return 1;
+    if (arg == Py_None) {
+        Py_DECREF(arg);
+        arg = (PyObject *)Py_TYPE(Py_None);
+        Py_INCREF(arg);
+        *flags = PyShadow_FlagC | PyShadow_FlagBasicType;
+        return arg;
     }
-    // forward ref, should it be explicit?
-    if (PyObject_IsInstance(thing, (PyObject *)&PyUnicode_Type) > 0)
+    if (PyObject_IsInstance(arg, (PyObject *)&PyUnicode_Type) > 0)
     {
-        return 3;
-    }
-    if (PyObject_IsInstance(thing, (PyObject *)&PyType_Type) > 0)
-    {
-        return 1;
-    }
-    if (PyObject_IsInstance(thing, (PyObject *)&PyShadow_Type) > 0)
-    {
-        // todo: might need to change this, or specialize based upon type
-        if (((shadowobject *)thing)->s_tp == PyShadow_UnionTp)
-        {
-            return 2;
+        tmp = arg;
+        arg = PyShadow_ForwardRef(tmp);
+        if (arg == NULL) {
+            *flags = PyShadow_FlagC | PyShadow_FlagInvalid;
+            return NULL;
         }
-        return 1; // maybe also 2?
+        Py_DECREF(tmp);
+        *flags = PyShadow_FlagC | PyShadow_FlagForwardRef;
+        // TODO: incref arg?
+        return arg;
     }
-    if (!PyCallable_Check(thing))
+    if (PyObject_IsInstance(arg, (PyObject *)&PyType_Type) > 0)
     {
-        //print("not callable")
-        // equiv to the `if not callable(...)` line
-        return -1;
+        *flags = PyShadow_FlagC | PyShadow_FlagBasicType;
+        // TODO: incref arg?
+        return arg;
     }
-    // TODO: anything else?
-    return 1;
+    if (PyObject_IsInstance(arg, (PyObject *)&PyShadow_Type) > 0)
+    {
+        // this branch covers 
+        // - isinstance(arg, (...,TypeVar, ForwardRef))
+        // - return arg
+        // Hmm, so we have an object that inherits from shadow, or may be a shadow
+        // but is there a better way to access the flags that using getattr?
+        tmp = PyObject_GetAttrString(arg, "_shadow_flags");
+        if (tmp == NULL) {
+            return NULL;
+        }
+        *flags = PyLong_AsLong(tmp);
+        Py_DECREF(tmp);
+        // TODO: incref arg?
+        return arg;
+    }
+    if (!PyCallable_Check(arg)) {
+        // equiv to the `if not callable(...)` line in type_check
+        *flags  = PyShadow_FlagPy | PyShadow_FlagInvalid;
+        
+        return arg;
+    }
+    
+    // otherwise, we don't really care about the type, it's "valid"
+    *flags = PyShadow_FlagPy | PyShadow_FlagBasicType;
+    return arg;
 }
 
 PyObject *
@@ -133,12 +195,33 @@ _copy_union_into(PyObject *tuple, PyObject *alias, Py_ssize_t alias_size, Py_ssi
 PyObject *
 PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
 {
+#define _IS_SIMPLE(x) (_IS_TYPE_BASIC(x) || !_IS_TYPE_UNION(x)) // TODO: this might need to change
     shadowobject *shadow;
-    PyObject *params;
+    PyObject *params, *_target = target, *_alias = alias;
+    int target_flags = 0, alias_flags = 0;
 
     if (target == NULL || alias == NULL)
     {
         PyErr_SetString(PyExc_TypeError, "both 'target' and 'alias' expected");
+        return NULL;
+    }
+    
+    target = normalize_arg(target, &target_flags);
+    if (target == NULL) {
+        return NULL;
+    }
+    if (_IS_TYPE_INVALID(target_flags)) {
+        PyErr_Format(PyExc_TypeError, "invalid type 'target', should be type, None, or union, got %.100R", _target);
+        return NULL;
+    }
+    
+    alias = normalize_arg(alias, &alias_flags);
+    if (alias == NULL) {
+        return NULL;
+    }
+    if (_IS_TYPE_INVALID(alias_flags)) 
+    {
+        PyErr_Format(PyExc_TypeError, "invalid type 'alias', should be type, None, or union, got %.100R", _alias);
         return NULL;
     }
 
@@ -147,56 +230,10 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
     {
         return NULL;
     }
-    shadow->s_tp = PyShadow_UnionTp;
-    Py_ssize_t target_tp = typ_check(target);
-    Py_ssize_t alias_tp = typ_check(alias);
-
-    if (target_tp < 0)
-    {
-        //printf("target_tp=%s\n", Py_TYPE(target)->tp_name);
-        PyErr_SetString(PyExc_TypeError, "'target' should be a type, None, or union");
-        Py_DECREF(shadow);
-        return NULL;
-    }
-    if (alias_tp < 0)
-    {
-        PyErr_SetString((PyExc_TypeError), "'alias' should be a type, None, or union");
-        Py_DECREF(shadow);
-        return NULL;
-    }
-
-    if (target == Py_None)
-    {
-        target = (PyObject *)Py_TYPE(Py_None);
-    }
-    else if (target_tp == 3)
-    { // str
-        target = PyShadow_ForwardRef(target);
-        if (target == NULL)
-        {
-            Py_DECREF(shadow);
-            return NULL;
-        }
-        target_tp = 1;
-    }
-    if (alias == Py_None)
-    {
-        alias = (PyObject *)Py_TYPE(Py_None);
-    }
-    else if (alias_tp == 3)
-    {
-        alias = PyShadow_ForwardRef(alias);
-        if (alias == NULL)
-        {
-            //TODO: I need to decref target here, but only if it's a forward ref..
-            Py_DECREF(shadow);
-            return NULL;
-        }
-        alias_tp = 1;
-    }
+    shadow->s_flags = PyShadow_FlagC | PyShadow_FlagUnion;
 
     /* in the simple case, both target and alias are simple types */
-    if (target_tp == 1 && alias_tp == 1)
+    if (_IS_SIMPLE(target_flags) && _IS_SIMPLE(alias_flags))
     {
         // sanity check both the same
 
@@ -211,8 +248,6 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
         params = PyTuple_Pack(2, target, alias);
         if (params == NULL)
         {
-            // TODO: should I just return NULL?
-            PyErr_SetString(PyExc_TypeError, "unknown error occured");
             Py_DECREF(shadow);
             Py_DECREF(params);
             return NULL;
@@ -220,22 +255,27 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
         Py_INCREF(params); // needed?
         shadow->s_params = (PyTupleObject *)params;
     }
-    // if "type | union", then check if type in union, and merge
-    else if (target_tp == 1 && alias_tp == 2)
+    // if "simpletype | union", then check if type in union, and merge
+    else if (_IS_SIMPLE(target_flags) && _IS_TYPE_UNION(alias_flags))
     {
-        shadowobject *s_alias = (shadowobject *)alias;
-        Py_ssize_t res = union_check_in(s_alias, target);
+        PyObject *alias_args = _get_union_args(alias);
+        if (alias_args == NULL) {
+            //error
+            Py_DECREF(shadow);
+            return NULL;
+        }
+        Py_ssize_t res = union_check_in(alias_args, target);
         if (res > 0)
         {
             // target is in alias, so we just use alias
-            Py_INCREF(s_alias->s_params);
+            Py_INCREF(alias_args);
             // re-use
-            shadow->s_params = s_alias->s_params;
+            shadow->s_params = (PyTupleObject *)alias_args;
         }
         else
         {
             // append tuple after type
-            Py_ssize_t alias_size = PyTuple_Size((PyObject *)s_alias->s_params);
+            Py_ssize_t alias_size = PyTuple_Size(alias_args);
             if (alias_size < 0)
             {
                 // error
@@ -257,7 +297,7 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
             }
             Py_INCREF(target); // I think?
 
-            params = _copy_union_into(params, (PyObject *)s_alias->s_params, alias_size, 1);
+            params = _copy_union_into(params, alias_args, alias_size, 1);
             if (params == NULL)
             {
                 Py_DECREF(params);
@@ -269,24 +309,28 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
         }
     }
     // if "union | type", then check if type in union, and merge
-    else if (target_tp == 2 && alias_tp == 1)
+    else if (_IS_TYPE_UNION(target_flags) && _IS_SIMPLE(alias_flags))
     {
         //printf("union | type\n");
-        shadowobject *s_target = (shadowobject *)target;
-        Py_ssize_t res = union_check_in(s_target, alias);
+        PyObject *target_args = _get_union_args(target);
+        if (target_args == NULL) {
+            Py_DECREF(shadow);
+            return NULL;
+        }
+        Py_ssize_t res = union_check_in(target_args, alias);
         if (res > 0)
         {
             //printf("-- type is in union, return union\n");
             // alias is in target, so we just use taret
-            Py_INCREF(s_target->s_params);
+            Py_INCREF(target_args);
             // re-use
-            shadow->s_params = s_target->s_params;
+            shadow->s_params = (PyTupleObject *)target_args;
         }
         else
         {
             //printf("-- type is not in union, need to append\n");
             // append type after tuple
-            Py_ssize_t target_size = PyTuple_Size((PyObject *)s_target->s_params);
+            Py_ssize_t target_size = PyTuple_Size(target_args);
             if (target_size < 0)
             {
                 // error
@@ -301,7 +345,7 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
                 return NULL;
             }
 
-            params = _copy_union_into(params, (PyObject *)s_target->s_params, target_size, 0);
+            params = _copy_union_into(params, target_args, target_size, 0);
             if (params == NULL)
             {
                 Py_DECREF(params);
@@ -322,15 +366,26 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
     }
     // if "union | union", check if each element of the smaller union is
     // in the other union, then merge
-    else if (target_tp == 2 && alias_tp == 2)
+    else if (_IS_TYPE_UNION(target_flags) && _IS_TYPE_UNION(alias_flags))
     {
+        PyObject *target_args = _get_union_args(target);
+        PyObject *alias_args = _get_union_args(alias);
+        if (target_args == NULL) {
+            Py_DECREF(shadow);
+            return NULL;
+        }
+        if (alias_args == NULL) {
+            Py_DECREF(shadow);
+            return NULL;
+        }
+        
         // size of new alias list is going to be at least the size of the lhs
         // tmp = tuple of length(rhs)
         // for each item in rhs
         //  if item in lhs: continue
         //  else: tmp.append(item)
         // params = tuple_concat(target, tmp)
-        Py_ssize_t rhs_size = PyTuple_Size((PyObject *)((shadowobject *)alias)->s_params);
+        Py_ssize_t rhs_size = PyTuple_Size(alias_args);
         if (rhs_size < 0)
         {
             Py_DECREF(shadow);
@@ -339,8 +394,8 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
         // special case
         if (rhs_size == 0)
         { // shouldn't happend
-            Py_INCREF(((shadowobject *)target)->s_params);
-            shadow->s_params = ((shadowobject *)target)->s_params;
+            Py_INCREF(target_args);
+            shadow->s_params = (PyTupleObject *)target_args;
         }
         else
         {
@@ -353,14 +408,14 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
             Py_ssize_t offset = 0;
             for (Py_ssize_t i = 0; i < rhs_size; i++)
             {
-                PyObject *other = PyTuple_GetItem(alias, i);
+                PyObject *other = PyTuple_GetItem(alias_args, i);
                 if (other == NULL)
                 {
                     Py_DECREF(shadow);
                     Py_DECREF(tmp);
                     return NULL;
                 }
-                if (union_check_in(((shadowobject *)target), other) > 0)
+                if (union_check_in(target_args, other) > 0)
                 {
                     // this item is in the other
                     continue;
@@ -386,8 +441,8 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
             // now tmp contains all the elements from rhs not in lhs
             // so we can concat
             params = PySequence_Concat(
-                (PyObject *)((shadowobject *)target)->s_params,
-                (PyObject *)((shadowobject *)alias)->s_params);
+                target_args,
+                alias_args);
 
             Py_DECREF(tmp); // not needed now
 
@@ -400,6 +455,7 @@ PyShadow_Union_(PyTypeObject *type, PyObject *target, PyObject *alias)
         }
     }
     return (PyObject *)shadow;
+#undef _IS_SIMPLE
 }
 
 // The public interface for creating a union in code
@@ -426,7 +482,7 @@ PyShadow_ForwardRef(PyObject *ref_str)
     {
         return NULL;
     }
-    shadow->s_tp = PyShadow_ForwardRefTp;
+    shadow->s_flags = PyShadow_FlagC | PyShadow_FlagForwardRef;
 
     params = PyTuple_Pack(1, ref_str);
     if (params == NULL)
@@ -460,7 +516,7 @@ shadow_new_impl(PyTypeObject *type)
     {
         return NULL;
     }
-    shadow->s_tp = PyShadow_Base;
+    shadow->s_flags = PyShadow_FlagC | PyShadow_FlagInvalid; // must be set by caller
     shadow->s_params = (PyTupleObject *)PyTuple_New(0); // ensure this is always a valid tuple
     if (shadow->s_params == NULL)
     {
@@ -474,17 +530,17 @@ shadow_new_impl(PyTypeObject *type)
 /*[clinic input]
 shadowobject.__init__ as shadow_init
 
-    tp: 'i' = 0
+    tp: 'i' = 0xff
     /
 
 [clinic start generated code]*/
 
 static int
 shadow_init_impl(shadowobject *self, int tp)
-/*[clinic end generated code: output=bf5aecee1a0ad583 input=e3d724cf2fb6500a]*/
+/*[clinic end generated code: output=bf5aecee1a0ad583 input=2eadbe23bccc880d]*/
 {
     //printf("shadow.init(%i)\n", tp);
-    self->s_tp = tp;
+    self->s_flags = tp;
     self->s_params = (PyTupleObject *)PyTuple_New(0); // ensure this is always a valid tuple
     if (self->s_params == NULL)
     {
@@ -511,7 +567,7 @@ shadowobject_traverse(shadowobject *shadow, visitproc visit, void *arg)
 static PyObject *
 shadow_repr(shadowobject *shadow)
 {
-   Py_ssize_t i;
+    Py_ssize_t i;
     _PyUnicodeWriter writer;
 
     i = Py_ReprEnter((PyObject *)shadow);
@@ -523,46 +579,64 @@ shadow_repr(shadowobject *shadow)
     writer.overallocate = 1; // TODO
     /* "<ShadowType>" */
     writer.min_length = 12;
-    
-    if (shadow->s_tp == PyShadow_Base) {
-        if (_PyUnicodeWriter_WriteASCIIString(&writer, "<ShadowType>", 12) < 0)
+
+    if (IS_PY(shadow))
+    {
+        PyObject *s = PyUnicode_FromFormat("<ShadowType flags=%02x at %p>",
+                                           shadow->s_flags, shadow);
+        // SHOULD NOT GET HERE (because a typing.<TYPE> should implement __repr__)?
+        if (_PyUnicodeWriter_WriteStr(&writer, s) < 0)
         {
             goto error;
         }
         goto end;
     }
-    else if (shadow->s_tp == PyShadow_UnionTp) {
-        if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowUnion[", 12) < 0)
+    else
+    { // else created from shadowobject.c or type.__or__
+        if (IS_TYPE_UNION(shadow))
+        {
+            if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowUnion[", 12) < 0)
+            {
+                goto error;
+            }
+        }
+        else if (IS_TYPE_FORWARDREF(shadow))
+        {
+            if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowForwardRef[", 17) < 0)
+            {
+                goto error;
+            }
+        }
+        else if (IS_TYPE_TYPEVAR(shadow))
+        {
+            if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowTypeVar[", 14) < 0)
+            {
+                goto error;
+            }
+        }
+        else
+        {
+            PyErr_Format(PyExc_NotImplementedError, "cannot repr shadow with flags %04x", shadow->s_flags);
+            goto error;
+        }
+
+        PyObject *s;
+        s = PyObject_Repr((PyObject *)shadow->s_params);
+        if (s == NULL)
         {
             goto error;
         }
-    }
-    else if (shadow->s_tp == PyShadow_ForwardRefTp) {
-        if (_PyUnicodeWriter_WriteASCIIString(&writer, "ShadowForwardRef[", 17) < 0)
+        if (_PyUnicodeWriter_WriteStr(&writer, s) < 0)
         {
+            Py_DECREF(s);
             goto error;
         }
-    }
-    else {
-        goto error;
-    }
-
-
-    PyObject *s;
-    s = PyObject_Repr((PyObject *)shadow->s_params);
-    if (s == NULL) {
-        goto error;
-    }
-    if (_PyUnicodeWriter_WriteStr(&writer, s) < 0)
-    {
         Py_DECREF(s);
-        goto error;
-    }
-    Py_DECREF(s);
 
-    if (_PyUnicodeWriter_WriteChar(&writer, ']') < 0)
-    {
-        goto error;
+        if (_PyUnicodeWriter_WriteChar(&writer, ']') < 0)
+        {
+            goto error;
+        }
     }
 end:
     Py_ReprLeave((PyObject *)shadow);
@@ -577,6 +651,9 @@ PyObject *
 PyShadow_UnionAsTuple(PyObject *self)
 {
     shadowobject *ob = (shadowobject *)self;
+    if (!IS_TYPE_UNION(ob)) {
+        return NULL;
+    }
     // todo: type check?
     return (PyObject *)ob->s_params;
 }
@@ -609,7 +686,8 @@ shadow_richcompare(PyObject *v, PyObject *w, int op)
     vu = (shadowobject *)v;
     wu = (shadowobject *)w;
     
-    if (vu->s_tp != wu->s_tp) {
+    if (vu->s_flags != wu->s_flags)
+    {
         // can't compare types that aren't equal
         Py_RETURN_NOTIMPLEMENTED;
     }
@@ -673,26 +751,107 @@ shadow_richcompare(PyObject *v, PyObject *w, int op)
 }
 
 static PyObject *
-PyShadow_gettp(shadowobject *self, void *closure)
+PyShadow_getorigin(shadowobject *self, void *closure)
 {
-    return PyLong_FromLong(self->s_tp);
+    return PyLong_FromLong(self->s_flags & PyShadow_MaskOrigin);
 }
+static PyObject *
+PyShadow_gettype(shadowobject *self, void *closure)
+{
+    return PyLong_FromLong(self->s_flags & PyShadow_MaskType);
+}
+static PyObject *
+PyShadow_getflags(shadowobject *self, void *closure)
+{
+    return PyLong_FromLong(self->s_flags);
+}
+/*
+static PyObject *
+PyShadow__args__(shadowobject *self, void *Py_UNUSED(closure))
+{
+    Py_INCREF(self->s_params);
+    return (PyObject *)self->s_params;
+}
+*/
+
+// TODO: there must be a better way to have class attributes ?
+static PyObject *
+PyShadow_flagpy(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagPy);
+}
+static PyObject *
+PyShadow_flagc(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagC);
+}
+static PyObject *
+PyShadow_flagunion(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagUnion);
+}
+static PyObject *
+PyShadow_flagforwardref(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagForwardRef);
+}
+static PyObject *
+PyShadow_flagtypevar(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagTypeVar);
+}
+static PyObject *
+PyShadow_flagbasic(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagBasicType);
+}
+static PyObject *
+PyShadow_flaginvalid(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_FlagInvalid);
+}
+static PyObject *
+PyShadow_maskorigin(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_MaskOrigin);
+}
+static PyObject *
+PyShadow_masktype(PyTypeObject *type, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(PyShadow_MaskType);
+}
+
+static PyGetSetDef PyShadow_gettersetters[] = {
+    {"_shadow_origin", (getter)PyShadow_getorigin, NULL, "1 if created in C", NULL},
+    {"_shadow_type", (getter)PyShadow_gettype, NULL, "shadow type", NULL},
+    {"_shadow_flags", (getter)PyShadow_getflags, NULL, "shadow flags", NULL},
+    //{"__args__", (getter)PyShadow__args__, NULL, "shadow parameters", NULL},
+    
+    {"FLAG_PY", (getter)PyShadow_flagpy, NULL, "created in python", NULL},
+    {"FLAG_C", (getter)PyShadow_flagc, NULL, "created in c", NULL},
+    {"FLAG_UNION", (getter)PyShadow_flagunion, NULL, "union type flag", NULL},
+    {"FLAG_FORWARDREF", (getter)PyShadow_flagforwardref, NULL, "forward ref type flat", NULL},
+    {"FLAG_TYPEVAR", (getter)PyShadow_flagtypevar, NULL, "typevar type flag", NULL},
+    {"FLAG_BASIC", (getter)PyShadow_flagbasic, NULL, "basic type flag", NULL},
+    {"FLAG_INVALID", (getter)PyShadow_flaginvalid, NULL, "invalid type flag", NULL},
+    {"MASK_ORIGIN", (getter)PyShadow_maskorigin, NULL, "origin mask", NULL},
+    {"MASK_TYPE", (getter)PyShadow_masktype, NULL, "type mask", NULL},
+    {NULL} /* sentinal */
+};
 
 static PyObject *
 PyShadow__getstate__(shadowobject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *ret, *tp;
-
-    tp = PyLong_FromLong(self->s_tp);
-    if (tp == NULL)
+    PyObject *ret, *flags;
+    flags = PyLong_FromLong(self->s_flags);
+    if (flags == NULL)
     {
         return NULL;
     }
-
-    ret = PyTuple_Pack(2, tp, (PyObject *)self->s_params); // will incref tp?
+    ret = Py_BuildValue("(OO)", flags, (PyObject *)self->s_params);
     if (ret == NULL)
     {
-        Py_DECREF(tp);
+        Py_DECREF(flags);
         return NULL;
     }
 
@@ -712,10 +871,11 @@ shadow_setstate(shadowobject *self, PyObject *state)
 /*[clinic end generated code: output=b1b85de8af0c68a6 input=f9bb611a6b4bc293]*/
 {
     //printf("setstate\n");
-    PyObject *params, *tpitem;
-    int tp = 0;
-    
-    if (self == NULL) {
+    PyObject *params, *flagitem;
+    int flags = PyShadow_FlagC;
+
+    if (self == NULL)
+    {
         return NULL;
     }
     if (!PyTuple_CheckExact(state))
@@ -728,31 +888,34 @@ shadow_setstate(shadowobject *self, PyObject *state)
         return PyErr_Format(PyExc_ValueError, "ShadowType.__setstate__ received tuple of wrong length");
     }
 
-    tpitem = PyTuple_GetItem(state, 0); // do I need to incref if I don't use it?
-    if (tpitem == NULL || !PyLong_CheckExact(tpitem))
+    flagitem = PyTuple_GetItem(state, 0); // do I need to incref if I don't use it?
+    if (flagitem == NULL || !PyLong_CheckExact(flagitem))
     {
-        return PyErr_Format(PyExc_TypeError, "tp argument of Shadow.__setstate__ is not int");
+        Py_XDECREF(flagitem);
+        return PyErr_Format(PyExc_TypeError, "flags argument of Shadow.__setstate__ is not int");
     }
-    tp = PyLong_AsLong(tpitem);
+    flags = PyLong_AsLong(flagitem);
+    Py_DECREF(flagitem);
 
-    if (tp < 0 || tp > PyShadow_MAXTp)
+    if (_IS_PY(flags))
     {
-        return PyErr_Format(PyExc_ValueError, "__setstate__ tp is not in correct range");
+        return PyErr_Format(PyExc_ValueError, "__setstate__ flag is invalid");
     }
     //printf("setstate, tp=%d\n", tp);
     params = PyTuple_GetItem(state, 1);
-    if (tpitem == NULL || !PyTuple_CheckExact(params))
+    if (params == NULL || !PyTuple_CheckExact(params))
     {
+        Py_XDECREF(params);
         return PyErr_Format(PyExc_TypeError, "could not get params from state");
     }
-/*
+    /*
     shadowobject *ret = (shadowobject *)shadow_new_impl(&PyShadow_Type);
     if (ret == NULL)
     {
         return NULL;
     }
     */
-    self->s_tp = tp;
+    self->s_flags = flags;
     Py_INCREF(params);
     Py_DECREF(self->s_params);
     self->s_params = (PyTupleObject *)params;
@@ -789,23 +952,23 @@ static Py_hash_t
 shadow_hash(shadowobject *self)
 {
     //printf("called shadow_hash\n");
-    PyObject *tuple, *tp;
+    PyObject *tuple, *flags;
     Py_hash_t ret;
-    tp = PyLong_FromLong(self->s_tp);
-    if (tp == NULL)
+    flags = PyLong_FromLong(self->s_flags);
+    if (flags == NULL)
     {
         return -1;
     }
 
-    tuple = PyTuple_Pack(2, tp, self->s_params);
+    tuple = PyTuple_Pack(2, flags, self->s_params);
     if (tuple == NULL)
     {
-        Py_DECREF(tp);
+        Py_DECREF(flags);
         return -1;
     }
 
     ret = PyObject_Hash(tuple);
-    Py_DECREF(tp);
+    Py_DECREF(flags);
     Py_DECREF(tuple);
     return ret;
 }
@@ -814,13 +977,13 @@ static PyObject *
 shadow_reduce(shadowobject *shadow, PyObject *Py_UNUSED(ignore))
 {
     PyObject *fn, *args, *state, *ret;
-    
     fn = PyObject_GetAttrString((PyObject *)&PyShadow_Type, "_unpickle");
-    if (fn == NULL) {
+    if (fn == NULL)
+    {
         //PyErr_SetString(PyExc_RuntimeError, "Could not find ShadowType._unpickle");
         return NULL;
     }
-    
+
     args = PyTuple_New(0);
     if (args == NULL)
     {
@@ -837,7 +1000,6 @@ shadow_reduce(shadowobject *shadow, PyObject *Py_UNUSED(ignore))
         return NULL;
     }
 
-    
     //ret = PyTuple_Pack(3, fn, args, state);
     ret = Py_BuildValue("(O(OO))", fn, args, state);
 
@@ -868,29 +1030,40 @@ static PyObject *
 shadow_unpickle_impl(PyTypeObject *type, PyObject *tup, PyObject *state)
 /*[clinic end generated code: output=f493457202450a90 input=e69aab13f29db555]*/
 {
-    shadowobject* shadow = (shadowobject *)shadow_new_impl(type);
-    if (shadow == NULL) {
+    shadowobject *shadow = (shadowobject *)shadow_new_impl(type);
+    if (shadow == NULL)
+    {
         return NULL;
     }
     shadow = (shadowobject *)shadow_setstate(shadow, state);
     return (PyObject *)shadow;
 }
 
-static PyGetSetDef PyShadow_gettersetters[] = {
-    {"tp", (getter)PyShadow_gettp, NULL, "shadow type", NULL},
-    {NULL} /* sentinal */
-};
+static PyObject *
+shadow_or(shadowobject *self, PyObject *other)
+{
+    return PyShadow_Union((PyObject *)self, other);
+}
 
 static PyMethodDef shadow_methods[] = {
-    {"__getstate__", (PyCFunction)PyShadow__getstate__, METH_NOARGS, "__getstate__"},
+   // {"__getstate__", (PyCFunction)PyShadow__getstate__, METH_NOARGS, "__getstate__"},
     SHADOW_UNPICKLE_METHODDEF
-    SHADOW_SETSTATE_METHODDEF
+    //SHADOW_SETSTATE_METHODDEF
     {"__reduce__", (PyCFunction)shadow_reduce, METH_NOARGS, reduce_doc},
     {NULL, NULL} /* sentinal */
 };
 
 static PyMappingMethods PyShadow_mapping = {
     .mp_subscript = (binaryfunc)shadow_getitem,
+};
+
+static PyMemberDef members[] = {
+    { "_shadow_args", T_OBJECT_EX, offsetof(shadowobject, s_params), READONLY, NULL},
+    { NULL }
+};
+
+static PyNumberMethods PyShadow_numbermethods = {
+    .nb_or = (binaryfunc)shadow_or,
 };
 
 PyTypeObject PyShadow_Type = {
@@ -914,6 +1087,8 @@ PyTypeObject PyShadow_Type = {
     .tp_methods = shadow_methods,
     .tp_getset = PyShadow_gettersetters,
     .tp_as_mapping = &PyShadow_mapping,
+    .tp_as_number = &PyShadow_numbermethods,
+    .tp_members = members,
 };
 
 PyObject *
@@ -921,9 +1096,9 @@ _get_promoted(PyObject *o)
 {
     PyObject *typing, *Union, *ForwardRef, *promoted = NULL;
     shadowobject *shadow = (shadowobject *)o;
-    int tp = shadow->s_tp;
-    
-    if (tp == PyShadow_Base) {
+
+    if (IS_PY(shadow))
+    {
         // it was created in python land, so just return it
         Py_INCREF(o);
         return o;
@@ -935,40 +1110,46 @@ _get_promoted(PyObject *o)
         PyErr_SetString(PyExc_RuntimeError, "couldn't import typing");
         return NULL;
     }
-    
-    switch (tp) {
-        case PyShadow_UnionTp: {
-            Union = PyObject_GetAttrString(typing, "Union");
-            if (Union == NULL)
-            {
-                PyErr_SetString(PyExc_RuntimeError, "couldn't find typing.Union");
-                break;
-            }
+
+    if (IS_TYPE_UNION(shadow))
+    {
+        Union = PyObject_GetAttrString(typing, "Union");
+        if (Union == NULL)
+        {
+            PyErr_SetString(PyExc_RuntimeError, "couldn't find typing.Union");
+        }
+        else
+        {
             // incref s_params?
             promoted = PyObject_GetItem(Union, (PyObject *)shadow->s_params);
             Py_DECREF(Union);
-        };
-        break;
-        case PyShadow_ForwardRefTp: {
-            if (PyTuple_Size((PyObject *)shadow->s_params) != 1) {
-                PyErr_SetString(PyExc_RuntimeError, "shadow forwardref length != 1");
-                break;
-            }
+        }
+    }
+    else if (IS_TYPE_FORWARDREF(shadow))
+    {
+        if (PyTuple_Size((PyObject *)shadow->s_params) != 1)
+        {
+            PyErr_SetString(PyExc_RuntimeError, "shadow forwardref length != 1");
+        }
+        else 
+        {
             ForwardRef = PyObject_GetAttrString(typing, "ForwardRef");
-            if (ForwardRef == NULL) 
+            if (ForwardRef == NULL)
             {
                 PyErr_SetString(PyExc_RuntimeError, "couldn't find typing.ForwardRef");
-                break;
             }
-            
-            promoted = PyObject_CallFunction(ForwardRef, "O", PyTuple_GetItem((PyObject *)shadow->s_params, 0));
-            Py_DECREF(ForwardRef);
+            else
+            {
+                promoted = PyObject_CallFunction(ForwardRef, "O", PyTuple_GetItem((PyObject *)shadow->s_params, 0));
+                Py_DECREF(ForwardRef);
+            }
         }
-        break;
-        default:
-            PyErr_Format(PyExc_NotImplementedError, "shadow promotion for type %i not implemented", shadow->s_tp);
     }
-    
+    else 
+    {
+        PyErr_Format(PyExc_NotImplementedError, "shadow promotion for type %i not implemented", shadow->s_flags);
+    }
+
     Py_DECREF(typing);
 
     if (promoted == NULL)
@@ -980,4 +1161,60 @@ _get_promoted(PyObject *o)
 
     // TODO: needs incref?
     return promoted;
+}
+
+/* assumption of this function is that it's called where we know shadow is 
+   either a shadow object, or inherits from it. We just don't know which.
+   
+   returns NULL on error, or a tuple object
+  */
+PyObject *
+_get_union_args(PyObject *shadow)
+{
+    PyObject *flagsitem, *args;
+    int flags = PyShadow_FlagInvalid;
+    if (shadow == NULL)
+    {
+        return NULL;
+    }
+    if (PyShadow_CheckExact(shadow)) {
+        if (!IS_TYPE_UNION(shadow)) {
+            PyErr_SetString(PyExc_TypeError, "expected union shadow type");
+            return NULL;
+        }
+        //Py_INCREF(((shadowobject *)shadow)->s_params);
+        return (PyObject *)((shadowobject *)shadow)->s_params;
+    }
+    // must inherit from shadowtype
+    flagsitem = PyObject_GetAttrString(shadow, "_shadow_flags");
+    if (flagsitem == NULL) {
+        return NULL;
+    }
+    flags = PyLong_AsLong(flagsitem);
+    Py_DECREF(flagsitem);
+    if (!_IS_TYPE_UNION(flags)) {
+        PyErr_SetString(PyExc_TypeError, "expected union shadow type");
+        return NULL;
+    }
+    
+    if (_IS_PY(flags)) {
+        // This means it's most likely a typing.Union
+        args = PyObject_GetAttrString(shadow, "__args__");
+        if (args == NULL)
+        {
+            return NULL;
+        }
+        //Py_INCREF(args);
+    }
+    else {
+        // probably wont get in this branch
+        // is C, should have _shadow_args filled out
+        args = PyObject_GetAttrString(shadow, "_shadow_args");
+        if (args == NULL)
+        {
+            return NULL;
+        }
+        //Py_INCREF(args);
+    }
+    return args;
 }

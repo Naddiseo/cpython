@@ -116,27 +116,42 @@ __all__ = [
 # namespace, but excluded from __all__ because they might stomp on
 # legitimate imports of those modules.
 
-_ShadowType = shadowobject # base type that gets checked
-        
+
+# TODO: can be simplified when I figure out class attributes
+_x = int|str
+_ShadowType = type(_x) # base type that gets checked
+_FLAG_PY = _x.FLAG_PY
+_FLAG_C = _x.FLAG_C
+_FLAG_UNION = _x.FLAG_UNION
+_FLAG_FORWARDREF = _x.FLAG_FORWARDREF
+_FLAG_TYPEVAR = _x.FLAG_TYPEVAR
+_FLAG_BASIC = _x.FLAG_BASIC
+_FLAG_INVALID = _x.FLAG_INVALID
+_MASK_ORIGIN = _x.MASK_ORIGIN
+_MASK_TYPE = _x.MASK_TYPE
+del _x
 
 def _promote_shadow(shadow):
-    PyShadow_Base = 0 # indicates it was constructed from this file
-    PyShadow_UnionTp = 1
-    PyShadow_ForwardRefTp = 2
-    PyShadow_TypeVarTp = 3
     #print("_promote_shadow", type(shadow))
-    if type(shadow) == _ShadowType:
-        if shadow.tp == PyShadow_Base:
+    if isinstance(shadow, _ShadowType):
+        assert hasattr(shadow,'_shadow_args'), repr(shadow)
+        _origin = shadow._shadow_origin
+        _type = shadow._shadow_type
+        _params = shadow._shadow_args
+        
+        if _origin == _FLAG_PY:
             return shadow
-        if shadow.tp == PyShadow_UnionTp:
-            return Union[tuple(shadow)]
-        elif shadow.tp == PyShadow_ForwardRefTp:
-            params = tuple(shadow)
-            assert len(params)==1, len(params)
-            return params[0]
-        elif shadow.tp == PyShadow_TypeVarTp:
+        
+        if _type == _FLAG_UNION:
+            return Union[_params]
+        
+        elif _type == _FLAG_FORWARDREF:
+            assert len(_params)==1, len(_params)
+            return _params[0]
+        elif _type == _FLAG_TYPEVAR:
             assert False, "not implemented yet"
             return shadow
+        
         assert False, "invalid shadow type"
     return shadow
 
@@ -511,7 +526,7 @@ Literal = _SpecialForm('Literal', doc=
     """)
 
 
-class ForwardRef(_Final, _root=True):
+class ForwardRef(_Final, _ShadowType, _root=True):
     """Internal wrapper to hold a forward reference."""
 
     __slots__ = ('__forward_arg__', '__forward_code__',
@@ -530,6 +545,8 @@ class ForwardRef(_Final, _root=True):
         self.__forward_evaluated__ = False
         self.__forward_value__ = None
         self.__forward_is_argument__ = is_argument
+        
+        _ShadowType.__init__(self, _FLAG_PY | _FLAG_FORWARDREF)
 
     def _evaluate(self, globalns, localns):
         if not self.__forward_evaluated__ or localns is not globalns:
@@ -559,6 +576,10 @@ class ForwardRef(_Final, _root=True):
 
     def __repr__(self):
         return f'ForwardRef({self.__forward_arg__!r})'
+    
+    def __reduce__(self):
+        return (ForwardRef, (self.__forward_arg__, self.__forward_is_argument__))
+        
 
 
 class TypeVar(_Final, _Immutable, _ShadowType, _root=True):
@@ -610,7 +631,7 @@ class TypeVar(_Final, _Immutable, _ShadowType, _root=True):
 
     def __init__(self, name, *constraints, bound=None,
                  covariant=False, contravariant=False):
-        _ShadowType.__init__(self, 0)
+        _ShadowType.__init__(self, _FLAG_PY | _FLAG_TYPEVAR)
         self.__name__ = name
         if covariant and contravariant:
             raise ValueError("Bivariant types are not supported.")
@@ -706,9 +727,10 @@ class _GenericAlias(_Final, _ShadowType, _root=True):
         if not name:
             self.__module__ = origin.__module__
         shadow_type_map = {
-            Union: 1,
+            Union: _FLAG_UNION,
+            # TODO: does this need filling out
         }
-        _ShadowType.__init__(self, shadow_type_map.get(origin, 0))
+        _ShadowType.__init__(self, _FLAG_PY | shadow_type_map.get(origin, _FLAG_BASIC))
         
 
     def __or__(self, right):

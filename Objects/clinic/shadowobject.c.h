@@ -37,7 +37,7 @@ static int
 shadow_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     int return_value = -1;
-    int tp = 0;
+    int tp = 255;
 
     if ((Py_TYPE(self) == &PyShadow_Type) &&
         !_PyArg_NoKeywords("shadowobject", kwargs)) {
@@ -105,4 +105,4 @@ shadow_unpickle(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs, PyO
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=a51701056dceb3a3 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=185e2b3e66ce9621 input=a9049054013a1b77]*/
